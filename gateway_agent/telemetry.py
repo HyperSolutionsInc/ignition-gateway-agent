@@ -1,8 +1,13 @@
 """Turn timer-script posts into AWS IoT messages and queue them in the outbox.
 
-Each published message carries rows in the ts.telemetry shape the cloud already ingests:
-ts, tag_id, asset_id, producer_id, ims_id, value_double, value_int, value_bool, value_string.
-Messages are packed up to IOT_MAX_MESSAGE_BYTES (AWS IoT caps a message at 128 KB).
+Every message goes to the same topic; what it is about travels in the payload:
+
+  {"v": 1, "gw": <thing>, "ims": <IMS key>, "pkg": <package version>, "rows": [...]}
+
+Rows are in the ts.telemetry shape the cloud already ingests: ts, tag_id, asset_id,
+producer_id, ims_id, value_double, value_int, value_bool, value_string. Messages are packed up
+to IOT_MAX_MESSAGE_BYTES (AWS IoT caps a message at 128 KB). The cloud rule should take the
+gateway from the topic, which the IoT policy pins to the certificate, not from `gw`.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from typing import Any
 from .config import Settings
 from .store import Store
 
+SCHEMA_VERSION = 1
 _VALUE_COLUMN = {"d": "value_double", "i": "value_int", "b": "value_bool", "s": "value_string"}
 
 
@@ -58,7 +64,7 @@ class Telemetry:
         return len(rows)
 
     def _enqueue(self, ims: str, version: Any, rows: list[dict[str, Any]]) -> None:
-        envelope = {"gateway": self.settings.thing_name, "ims": ims, "version": version}
+        envelope = {"v": SCHEMA_VERSION, "gw": self.settings.thing_name, "ims": ims, "pkg": version}
         overhead = len(json.dumps({**envelope, "rows": []}))
         limit = self.settings.max_message_bytes
         batch: list[dict[str, Any]] = []

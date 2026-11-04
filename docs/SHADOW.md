@@ -24,7 +24,8 @@ fetch it.
     "desired": {
       "ims": ["FWT-01", "FWT-02"],
       "publish_paused": false,
-      "telemetry_topic": "hyper/gateways/{thing}/ims/{ims}/telemetry",
+      "telemetry_rule": "hyper_telemetry",
+      "telemetry_topic": "hyper/{thing}/telemetry",
       "rescan": 3,
       "restart": 1
     }
@@ -36,7 +37,8 @@ fetch it.
 | --- | --- |
 | `ims` | IMS keys whose `ims-<key>` shadows the agent should fetch. Deltas are not replayed after a disconnect, so the agent re-reads every listed shadow on each connect. Adding a key here is how a new IMS is announced to the gateway. |
 | `publish_paused` | Stop or resume uplink. Readings keep buffering locally while paused. |
-| `telemetry_topic` | Override the telemetry topic template (`{thing}`, `{ims}`). |
+| `telemetry_rule` | Basic Ingest rule that telemetry is delivered to. `""` switches to plain pub/sub on the telemetry topic, so it can be watched in the MQTT test client. |
+| `telemetry_topic` | Override the telemetry topic template (`{thing}`). |
 | `rescan` | Any new value triggers an Ignition project rescan. |
 | `restart` | Any new value restarts the Ignition gateway, only if the agent runs with `ALLOW_REMOTE_RESTART=true`; otherwise the agent reports `restart_refused`. |
 
@@ -102,11 +104,11 @@ and timer scripts from it on the gateway, so the cloud never has to ship Jython.
   expected use. Up to 64 MB.
 * **Inline**: `{"type": "inline", "encoding": "gzip+base64", "data": "..."}`. Only for small
   packages, since the whole shadow document must stay under 8 KB.
-* **MQTT**: `"mqtt"`. The agent publishes
-  `hyper/gateways/<thing>/packages/<key>/request` with `{"request_id", "sha256"}`. The cloud
-  answers on `hyper/gateways/<thing>/packages/<key>/chunk` with
-  `{"request_id", "seq", "total", "data": "<base64>"}`, sequence numbers `0..total-1`, each
-  message under 128 KB. The transfer must complete within 120 s.
+* **MQTT**: `"mqtt"`. The agent publishes `hyper/<thing>/package/request` with
+  `{"ims", "request_id", "sha256"}`. The cloud answers on `hyper/<thing>/package/chunk` with
+  `{"ims", "request_id", "seq", "total", "data": "<base64>"}`, sequence numbers
+  `0..total-1`, each message under 128 KB. `request_id` ties chunks to their request, so
+  several IMS transfers can share the topic. The transfer must complete within 120 s.
 
 Whatever the source, the bytes must hash to `desired.sha256` or nothing is installed.
 

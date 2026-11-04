@@ -2,7 +2,7 @@
 
 Named shadows on the gateway's thing:
 
-  gateway        desired: ims list, rescan/restart nonces, publish_paused, telemetry_topic
+  gateway        desired: ims list, rescan/restart nonces, publish_paused, telemetry_rule/topic
                  reported: the same keys + health (Ignition state, packages, outbox, link, cert)
 
   ims-<key>      one per IMS. desired: version, sha256, source, filename, enabled, interval_ms,
@@ -11,7 +11,7 @@ Named shadows on the gateway's thing:
 A shadow document is capped at 8 KB, so package content never sits in the shadow itself. The
 `source` field says where to get it: an HTTPS URL (an S3 presigned URL, for example), an
 inline gzip+base64 blob for small packages, or "mqtt" to have the cloud stream it in chunks
-on hyper/gateways/<thing>/packages/<ims>/chunk. Content is checked against desired.sha256
+on hyper/<thing>/package/chunk. Content is checked against desired.sha256
 before anything is installed. See docs/SHADOW.md for the full contract.
 """
 
@@ -86,7 +86,7 @@ class ShadowAgent:
         self.link.subscribe(base + "get/rejected", self._on_rejected)
         self.link.subscribe(base + "update/delta", self._on_delta)
         self.link.subscribe(base + "update/rejected", self._on_rejected)
-        self.link.subscribe("hyper/gateways/%s/packages/+/chunk" % self.thing, self._on_chunk)
+        self.link.subscribe(self.settings.package_topic("chunk"), self._on_chunk)
         self.link.on_connect(self.sync_all)
         threading.Thread(target=self._worker, name="shadow-worker", daemon=True).start()
         threading.Thread(target=self._health_loop, name="shadow-health", daemon=True).start()
@@ -166,6 +166,10 @@ class ShadowAgent:
         if desired.get("telemetry_topic"):
             self.settings.telemetry_topic = str(desired["telemetry_topic"])
             update["telemetry_topic"] = self.settings.telemetry_topic
+        if isinstance(desired.get("telemetry_rule"), str):
+            # "" switches to plain pub/sub, e.g. to watch the stream in the MQTT test client.
+            self.settings.telemetry_rule = desired["telemetry_rule"]
+            update["telemetry_rule"] = self.settings.telemetry_rule
 
         if "rescan" in desired and desired["rescan"] != reported.get("rescan"):
             self.ignition.scan_projects()
@@ -258,9 +262,8 @@ class ShadowAgent:
         with self._chunk_lock:
             self._chunks[request_id] = pending
         try:
-            topic = "hyper/gateways/%s/packages/%s/request" % (self.thing, ims)
-            body = json.dumps({"request_id": request_id, "sha256": sha256}).encode("utf-8")
-            if not self.link.publish(topic, body, qos=1):
+            body = json.dumps({"ims": ims, "request_id": request_id, "sha256": sha256}).encode("utf-8")
+            if not self.link.publish(self.settings.package_topic("request"), body, qos=1):
                 raise RuntimeError("could not request package over MQTT (not connected)")
             if not pending["done"].wait(CHUNK_TIMEOUT_S):
                 raise TimeoutError("package %s: got %d/%s chunks" % (ims, len(pending["parts"]), pending["total"]))
@@ -316,6 +319,7 @@ def build_health(settings: Settings, store: Store, link: Any, publisher: Any, te
         "link": {
             "connected_since": _iso(link.connected_since),
             "last_disconnect": link.last_disconnect_reason,
+            "telemetry_topic": settings.telemetry_publish_topic,
         },
         "outbox": store.outbox_stats(),
         "published_messages": getattr(publisher, "published_messages", None),

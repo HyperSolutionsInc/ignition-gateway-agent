@@ -19,7 +19,8 @@ def test_rows_become_ts_telemetry_shape(settings, store):
     assert t.accept(post(2)) == 2
     (_, ims, payload), = store.peek(10)
     msg = json.loads(payload)
-    assert ims == "FWT-02" and msg["gateway"] == "gw-test" and msg["version"] == "abc"
+    assert ims == "FWT-02"
+    assert (msg["v"], msg["gw"], msg["ims"], msg["pkg"]) == (1, "gw-test", "FWT-02", "abc")
     assert msg["rows"][0] == {
         "ts": "2025-11-01T12:26:40.000+00:00", "tag_id": 0, "asset_id": 10, "producer_id": None, "ims_id": "ENV",
         "value_double": 1.5, "value_int": None, "value_bool": None, "value_string": None,
@@ -52,6 +53,15 @@ def test_buffer_cap_drops_oldest(settings, store):
     t.accept(post(3, ts=2))
     stats = store.outbox_stats()
     assert stats["rows"] == 3 and stats["dropped_rows_total"] == 3
+
+
+def test_basic_ingest_topic(settings):
+    settings.telemetry_rule = "hyper_telemetry"
+    settings.telemetry_topic = "hyper/{thing}/telemetry"
+    assert settings.telemetry_publish_topic == "$aws/rules/hyper_telemetry/hyper/gw-test/telemetry"
+    settings.telemetry_rule = ""
+    assert settings.telemetry_publish_topic == "hyper/gw-test/telemetry"
+    assert settings.package_topic("request") == "hyper/gw-test/package/request"
 
 
 def test_malformed(settings, store):

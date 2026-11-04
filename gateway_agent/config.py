@@ -61,10 +61,12 @@ class Settings:
     # The thing name is also the MQTT client id and the gateway's identity everywhere else.
     thing_name: str = field(default_factory=lambda: _env("IOT_THING_NAME"))
     client_id: str = field(default_factory=lambda: _env("IOT_CLIENT_ID"))
-    # Telemetry topic; {thing} and {ims} are substituted.
-    telemetry_topic: str = field(
-        default_factory=lambda: _env("IOT_TELEMETRY_TOPIC", "hyper/gateways/{thing}/ims/{ims}/telemetry")
-    )
+    # Telemetry goes through AWS IoT Basic Ingest: published to $aws/rules/<rule>/<topic>, it is
+    # handed straight to the rule (no pub/sub messaging charge, no subscribers). The rule still
+    # sees <topic>, so the thing name stays in it for policy scoping. Empty rule = normal pub/sub.
+    telemetry_rule: str = field(default_factory=lambda: _env("IOT_TELEMETRY_RULE", "hyper_telemetry"))
+    # {thing} is substituted. Everything else about the data travels in the payload.
+    telemetry_topic: str = field(default_factory=lambda: _env("IOT_TELEMETRY_TOPIC", "hyper/{thing}/telemetry"))
     max_message_bytes: int = field(default_factory=lambda: _env_int("IOT_MAX_MESSAGE_BYTES", 100_000))
     shadow_enabled: bool = field(default_factory=lambda: _env_bool("SHADOW_ENABLED", True))
     health_interval_s: int = field(default_factory=lambda: _env_int("HEALTH_INTERVAL_S", 60))
@@ -77,6 +79,15 @@ class Settings:
     @property
     def mqtt_client_id(self) -> str:
         return self.client_id or self.thing_name
+
+    @property
+    def telemetry_publish_topic(self) -> str:
+        topic = self.telemetry_topic.format(thing=self.thing_name)
+        return "$aws/rules/%s/%s" % (self.telemetry_rule, topic) if self.telemetry_rule else topic
+
+    def package_topic(self, kind: str) -> str:
+        """hyper/<thing>/package/request (gateway -> cloud) or .../chunk (cloud -> gateway)."""
+        return "hyper/%s/package/%s" % (self.thing_name, kind)
 
     @property
     def inbox_dir(self) -> Path:

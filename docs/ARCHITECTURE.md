@@ -6,8 +6,8 @@
                     │                                  │ thing: <gateway>              │
                     │ one IMS export (.json / .zip)    │  shadow "gateway"             │
                     │                                  │  shadow "ims-<key>" (per IMS) │
-      ┌─────────────┼──────────────┐                   │  topic hyper/gateways/<thing>/│
-      │ inbox drop  │ HTTP upload  │ shadow source ◄───┤        ims/<key>/telemetry    │
+      ┌─────────────┼──────────────┐                   │  rule hyper_telemetry         │
+      │ inbox drop  │ HTTP upload  │ shadow source ◄───┤   (Basic Ingest)              │
       ▼             ▼              ▼                   └──────────────▲────────────────┘
  ┌──────────────────────────────────────────┐   MQTT over TLS (8883) │
  │ gateway-agent container                   │   X.509 device cert    │
@@ -75,19 +75,61 @@ the gateway to make them take effect.
 6. Trigger a project rescan.
 7. Record the result (installed or failed with the error) in the agent's store.
 
+## Topics
+
+The topic structure is kept shallow on purpose: the topic says *who* sent a message and
+*what kind* it is, and everything else travels in the payload. Adding an IMS, a tag or a
+payload field never needs a new topic, policy change or rule change.
+
+| Direction | Topic | Payload |
+| --- | --- | --- |
+| gateway → cloud | `$aws/rules/hyper_telemetry/hyper/<thing>/telemetry` | telemetry (below) |
+| gateway → cloud | `hyper/<thing>/package/request` | `{ims, request_id, sha256}` |
+| cloud → gateway | `hyper/<thing>/package/chunk` | `{ims, request_id, seq, total, data}` |
+| both | `$aws/things/<thing>/shadow/name/<name>/...` | AWS Device Shadow (see SHADOW.md) |
+
+The thing name stays in every topic because the IoT policy uses it
+(`${iot:Connection.Thing.ThingName}`) to stop one gateway's certificate from publishing
+as another gateway.
+
+### Basic Ingest
+
+Telemetry is published with AWS IoT **Basic Ingest**: a topic beginning
+`$aws/rules/<rule name>/` is delivered straight to that rule, bypassing the message broker.
+There's no messaging charge for it, but nothing can subscribe to it either. The rule sees
+the topic with the `$aws/rules/hyper_telemetry/` prefix removed (`hyper/<thing>/telemetry`),
+so it can still read the gateway from the topic:
+
+```sql
+SELECT *, topic(2) AS gateway_id FROM 'hyper/+/telemetry'
+```
+
+The rule **must exist** under the name in `IOT_TELEMETRY_RULE` (default `hyper_telemetry`).
+Messages sent to a rule name that doesn't exist are dropped.
+
+To watch a gateway's telemetry live while debugging, set `telemetry_rule` to `""` on the
+`gateway` shadow. The agent then publishes to plain `hyper/<thing>/telemetry`, which the
+MQTT test client can subscribe to. Set it back to `hyper_telemetry` when you're done; the
+policy allows both topics.
+
 ## Telemetry message
 
 ```json
 {
-  "gateway": "<thing>",
+  "v": 1,
+  "gw": "<thing>",
   "ims": "FWT-02",
-  "version": "f132213ca2cd0b7f",
+  "pkg": "f132213ca2cd0b7f",
   "rows": [
     {"ts": "2026-11-04T02:23:20.000+00:00", "tag_id": 12710, "asset_id": 116, "producer_id": null,
      "ims_id": "CB08", "value_double": 41.2, "value_int": null, "value_bool": null, "value_string": null}
   ]
 }
 ```
+
+`v` is the payload schema version; `pkg` is the content hash of the IMS package that produced
+the readings. `gw` is informational: the rule should trust `topic(2)`, which the policy pins
+to the certificate.
 
 Rows have the same columns as `ts.telemetry`, so a cloud rule can insert them without
 reshaping. Messages are packed up to `IOT_MAX_MESSAGE_BYTES` (default 100 KB; AWS caps

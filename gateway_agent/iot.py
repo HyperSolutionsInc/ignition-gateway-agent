@@ -134,8 +134,8 @@ class Publisher(threading.Thread):
             if not batch:
                 self._stop.wait(0.5)
                 continue
-            for message_id, ims, payload in batch:
-                topic = self.settings.telemetry_topic.format(thing=self.settings.thing_name, ims=ims)
+            topic = self.settings.telemetry_publish_topic
+            for message_id, _ims, payload in batch:
                 if not self.link.publish(topic, payload):
                     self._stop.wait(2)
                     break

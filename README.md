@@ -6,7 +6,8 @@ A sidecar container for an Ignition 8.3 gateway. It:
   tag import plus generated timer and library scripts, and installs them without restarting
   the gateway. IMSs can be added one at a time as they are stood up;
 * **uplinks telemetry to AWS IoT Core**: the generated timer scripts read each IMS's tags
-  and hand the values to the agent, which buffers them on disk and publishes over MQTT/TLS;
+  and hand the values to the agent, which buffers them on disk and publishes over MQTT/TLS
+  through Basic Ingest to the `hyper_telemetry` rule;
 * **takes configuration from Device Shadows**: new or updated IMS packages, timer settings,
   removals and gateway actions arrive through named shadows, and gateway health is reported
   back.
@@ -20,6 +21,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and
   tags and scan projects.
 * An AWS IoT thing for the gateway, with an active X.509 certificate that has
   [docs/aws-iot-policy.json](docs/aws-iot-policy.json) attached.
+* An AWS IoT rule named `hyper_telemetry` (or whatever `IOT_TELEMETRY_RULE` is set to) with
+  `FROM 'hyper/+/telemetry'`. Telemetry sent to a rule that doesn't exist is dropped. See
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#topics).
 
 ## Deploy next to Ignition
 

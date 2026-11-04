@@ -79,12 +79,14 @@ def test_mqtt_chunked_source(settings, store, installer):
     data = to_bytes(ims_tree())
 
     def cloud(topic, payload):
-        if topic.endswith("/packages/FWT-02/request"):
+        if topic == "hyper/gw-test/package/request":
             req = json.loads(payload)
+            assert req["ims"] == "FWT-02"
             parts = [data[i:i + 100] for i in range(0, len(data), 100)]
             for seq, part in enumerate(parts):
-                msg = {"request_id": req["request_id"], "seq": seq, "total": len(parts), "data": base64.b64encode(part).decode()}
-                agent._on_chunk("hyper/gateways/gw-test/packages/FWT-02/chunk", json.dumps(msg).encode())
+                msg = {"ims": "FWT-02", "request_id": req["request_id"], "seq": seq, "total": len(parts),
+                       "data": base64.b64encode(part).decode()}
+                agent._on_chunk("hyper/gw-test/package/chunk", json.dumps(msg).encode())
 
     link.on_publish = cloud
     agent._apply_ims("ims-FWT-02", {"version": "1", "sha256": hashlib.sha256(data).hexdigest(), "source": "mqtt"}, {})
@@ -122,6 +124,14 @@ def test_gateway_shadow_requests_listed_ims_and_refuses_restart(settings, store,
     assert reported["rescan"] == 1 and "restart" not in reported and "restart_refused" in reported
     assert "/data/api/v1/scan/projects" in fake_ignition.paths()
     assert "/data/api/v1/restart" not in fake_ignition.paths()
+
+
+def test_gateway_shadow_can_switch_off_basic_ingest(settings, store, installer):
+    agent, link = make_agent(settings, store, installer)
+    settings.telemetry_rule = "hyper_telemetry"
+    agent._apply_gateway({"telemetry_rule": ""}, {})
+    assert settings.telemetry_publish_topic == "hyper/gw-test/telemetry"
+    assert link.updates("gateway")[-1]["reported"]["telemetry_rule"] == ""
 
 
 def test_shadow_name_sanitising():
