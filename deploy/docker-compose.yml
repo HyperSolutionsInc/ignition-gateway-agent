@@ -1,0 +1,53 @@
+# Runs gateway-agent next to an existing Ignition container.
+#
+# It joins the Ignition stack's Docker network (so timer scripts reach it as
+# http://gateway-agent:8600) and mounts the gateway's data volume (so it can write the
+# managed project). Both are referenced as external; set the names to match the stack:
+#
+#   IGNITION_NETWORK=ignition-stack_datacenter-net
+#   IGNITION_DATA_VOLUME=ignition-stack_ignition-data
+#
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+
+services:
+  gateway-agent:
+    build: ..
+    image: gateway-agent:latest
+    container_name: gateway-agent
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ignition-data:/ignition-data
+      - agent-state:/var/lib/gateway-agent
+      - ${IOT_CERT_DIR:-./certs}:/certs:ro
+    ports:
+      # Operators and HAMF uploads use this; keep it off public interfaces.
+      - "${AGENT_PUBLISH_ADDR:-127.0.0.1}:8600:8600"
+    networks:
+      - ignition
+    # Optional: supply tokens as Docker secrets instead of environment variables. Uncomment this
+    # and the top-level `secrets:` block, then set AGENT_API_TOKEN_FILE=/run/secrets/agent_api_token
+    # (and the others) in .env.
+    # secrets:
+    #   - agent_api_token
+    #   - agent_ingest_token
+    #   - ignition_api_token
+
+# secrets:
+#   agent_api_token:
+#     file: ./secrets/agent_api_token
+#   agent_ingest_token:
+#     file: ./secrets/agent_ingest_token
+#   ignition_api_token:
+#     file: ./secrets/ignition_api_token
+
+volumes:
+  ignition-data:
+    external: true
+    name: ${IGNITION_DATA_VOLUME:-ignition-stack_ignition-data}
+  agent-state:
+
+networks:
+  ignition:
+    external: true
+    name: ${IGNITION_NETWORK:-ignition-stack_datacenter-net}
