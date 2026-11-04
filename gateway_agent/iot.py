@@ -16,6 +16,17 @@ log = logging.getLogger(__name__)
 MessageHandler = Callable[[str, bytes], None]
 
 
+def tls_context(settings: Settings) -> ssl.SSLContext:
+    """Mutual-TLS context for AWS IoT Core: verify the server against the Amazon root CA only."""
+    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=settings.iot_ca_path)
+    # These are the defaults for SERVER_AUTH; set explicitly so they can't drift.
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = True
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(settings.iot_cert_path, settings.iot_key_path)
+    return ctx
+
+
 class IotLink:
     """One persistent MQTT connection, shared by the publisher and the shadow handler."""
 
@@ -36,9 +47,7 @@ class IotLink:
             protocol=mqtt.MQTTv311,
             clean_session=True,
         )
-        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=settings.iot_ca_path)
-        ctx.load_cert_chain(settings.iot_cert_path, settings.iot_key_path)
-        client.tls_set_context(ctx)
+        client.tls_set_context(tls_context(settings))
         client.reconnect_delay_set(min_delay=1, max_delay=60)
         client.max_inflight_messages_set(20)
         client.on_connect = self._handle_connect

@@ -19,6 +19,8 @@ from `gw`.
 from __future__ import annotations
 
 import json
+import math
+import re
 import threading
 import time
 from typing import Any
@@ -28,6 +30,17 @@ from .store import Store
 
 SCHEMA_VERSION = 2
 _SEP = (",", ":")
+
+# Limits on what one timer-script post may contain. The FWT-02 IMS sends 3,901 readings per tick
+# and the publisher batches at most 30 ticks per post, so these leave wide headroom.
+MAX_TICKS_PER_POST = 1_000
+MAX_READINGS_PER_TICK = 100_000
+MAX_STRING_VALUE = 1_024
+_IMS_RE = re.compile(r"[A-Za-z0-9:_.\-]{1,64}")
+_VERSION_RE = re.compile(r"[A-Za-z0-9_\-]{1,64}")
+_MIN_TS_MS = 946_684_800_000  # 2000-01-01T00:00:00Z
+_MAX_FUTURE_MS = 24 * 3600 * 1000
+_MAX_TAG_ID = 2**63 - 1
 
 
 class TelemetryError(ValueError):
@@ -43,12 +56,22 @@ class Telemetry:
 
     def accept(self, body: dict[str, Any]) -> int:
         """Accept one POST from hyper.publisher. Returns the number of readings queued."""
+        if not isinstance(body, dict):
+            raise TelemetryError("expected a JSON object")
         ims = body.get("ims")
         ticks = body.get("ticks")
+        version = body.get("version")
         if not isinstance(ims, str) or not isinstance(ticks, list):
             raise TelemetryError("expected {ims, version, ticks: [...]}")
+        if not _IMS_RE.fullmatch(ims):
+            raise TelemetryError("ims must be 1-64 characters of A-Z a-z 0-9 : _ . -")
+        if version is not None and not (isinstance(version, str) and _VERSION_RE.fullmatch(version)):
+            raise TelemetryError("version must be 1-64 characters of A-Z a-z 0-9 _ -")
+        if len(ticks) > MAX_TICKS_PER_POST:
+            raise TelemetryError("at most %d ticks per post" % MAX_TICKS_PER_POST)
 
-        clean = [_tick(t) for t in ticks]
+        now_ms = time.time() * 1000
+        clean = [_tick(t, now_ms) for t in ticks]
         if clean:
             last = clean[-1]
             self.last_tick[ims] = {
@@ -96,27 +119,41 @@ class Telemetry:
                 self._put(ims, envelope, out)
 
     def _put(self, ims: str, envelope: dict[str, Any], ticks: list[dict[str, Any]]) -> None:
-        payload = json.dumps({**envelope, "ticks": ticks}, separators=_SEP).encode("utf-8")
+        payload = json.dumps({**envelope, "ticks": ticks}, separators=_SEP, allow_nan=False).encode("utf-8")
         readings = sum(len(t["r"]) for t in ticks)
         self.store.enqueue(ims, readings, payload, self.settings.buffer_max_rows)
 
 
-def _tick(tick: Any) -> dict[str, Any]:
+def _tick(tick: Any, now_ms: float) -> dict[str, Any]:
     if not isinstance(tick, dict):
         raise TelemetryError("malformed tick %r" % (tick,))
     ts = tick.get("ts")
-    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts <= 0:
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
         raise TelemetryError("bad tick timestamp %r" % (ts,))
+    if not _MIN_TS_MS <= ts <= now_ms + _MAX_FUTURE_MS:
+        raise TelemetryError("tick timestamp %r is before 2000 or more than a day ahead" % (ts,))
+    bad = tick.get("bad") or 0
+    if isinstance(bad, bool) or not isinstance(bad, int) or bad < 0:
+        raise TelemetryError("bad count must be a non-negative integer")
+    rows = tick.get("rows") or []
+    if not isinstance(rows, list) or len(rows) > MAX_READINGS_PER_TICK:
+        raise TelemetryError("rows must be a list of at most %d readings" % MAX_READINGS_PER_TICK)
     readings = []
-    for r in tick.get("rows") or []:
+    for r in rows:
         # [tag_id, value] from hyper.publisher
-        if (
-            not isinstance(r, list)
-            or len(r) != 2
-            or isinstance(r[0], bool)
-            or not isinstance(r[0], int)
-            or not isinstance(r[1], (bool, int, float, str))
-        ):
+        if not isinstance(r, list) or len(r) != 2:
             raise TelemetryError("malformed reading %r" % (r,))
-        readings.append(r)
-    return {"ts": int(ts), "bad": int(tick.get("bad") or 0), "r": readings}
+        tag_id, value = r
+        if isinstance(tag_id, bool) or not isinstance(tag_id, int) or not 0 < tag_id <= _MAX_TAG_ID:
+            raise TelemetryError("tag_id must be a positive integer, got %r" % (tag_id,))
+        if isinstance(value, float) and not math.isfinite(value):
+            # NaN/Infinity are not valid JSON; a sensor reading like this is dropped, counted as bad.
+            bad += 1
+            continue
+        if isinstance(value, str):
+            if len(value) > MAX_STRING_VALUE:
+                raise TelemetryError("string value for tag %d longer than %d characters" % (tag_id, MAX_STRING_VALUE))
+        elif not isinstance(value, (bool, int, float)):
+            raise TelemetryError("value for tag %d must be a number, boolean or string" % tag_id)
+        readings.append([tag_id, value])
+    return {"ts": int(ts), "bad": bad, "r": readings}

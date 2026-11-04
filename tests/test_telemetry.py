@@ -10,7 +10,7 @@ def post(n_rows, ts=1762223000000, bad=1, value=1.5):
         "ims": "FWT-02",
         "version": "abc",
         "dropped": 0,
-        "ticks": [{"ts": ts, "rows": [[i, value] for i in range(n_rows)], "bad": bad, "total": n_rows + bad}],
+        "ticks": [{"ts": ts, "rows": [[i + 1, value] for i in range(n_rows)], "bad": bad, "total": n_rows + bad}],
     }
 
 
@@ -24,7 +24,7 @@ def test_compact_envelope(settings, store):
     (msg,) = messages(store)
     assert msg == {
         "v": 2, "gw": "gw-test", "ims": "FWT-02", "pkg": "abc",
-        "ticks": [{"ts": 1762223000000, "bad": 1, "r": [[0, 1.5], [1, 1.5]]}],
+        "ticks": [{"ts": 1762223000000, "bad": 1, "r": [[1, 1.5], [2, 1.5]]}],
     }
     assert t.last_tick["FWT-02"]["good"] == 2 and t.last_tick["FWT-02"]["bad"] == 1
     assert store.outbox_stats()["rows"] == 2
@@ -59,7 +59,7 @@ def test_large_tick_is_split_with_same_ts(settings, store):
     assert all(len(json.dumps(m, separators=(",", ":"))) <= 2000 for m in msgs)
     ticks = [t for m in msgs for t in m["ticks"]]
     assert {t["ts"] for t in ticks} == {1762223000000}
-    assert [r[0] for t in ticks for r in t["r"]] == list(range(1000))
+    assert [r[0] for t in ticks for r in t["r"]] == list(range(1, 1001))
     assert sum(t["bad"] for t in ticks) == 5  # counted once, not per split
 
 
@@ -73,8 +73,8 @@ def test_empty_tick_still_updates_health(settings, store):
 def test_buffer_cap_drops_oldest(settings, store):
     settings.buffer_max_rows = 5
     t = Telemetry(settings, store)
-    t.accept(post(3, ts=1))
-    t.accept(post(3, ts=2))
+    t.accept(post(3, ts=1762223000000))
+    t.accept(post(3, ts=1762223001000))
     stats = store.outbox_stats()
     assert stats["rows"] == 3 and stats["dropped_rows_total"] == 3
 
@@ -90,9 +90,9 @@ def test_basic_ingest_topic(settings):
 
 @pytest.mark.parametrize("body", [
     {"ims": "x"},
-    {"ims": "x", "ticks": [{"ts": 1, "rows": [[1, 2, 3]]}]},
-    {"ims": "x", "ticks": [{"ts": 1, "rows": [["1", 2]]}]},
-    {"ims": "x", "ticks": [{"ts": 1, "rows": [[1, {"nested": 1}]]}]},
+    {"ims": "x", "ticks": [{"ts": 1762223000000, "rows": [[1, 2, 3]]}]},
+    {"ims": "x", "ticks": [{"ts": 1762223000000, "rows": [["1", 2]]}]},
+    {"ims": "x", "ticks": [{"ts": 1762223000000, "rows": [[1, {"nested": 1}]]}]},
     {"ims": "x", "ticks": [{"ts": "soon", "rows": []}]},
 ])
 def test_malformed(settings, store, body):

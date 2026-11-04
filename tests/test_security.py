@@ -40,7 +40,7 @@ def call(url, method="GET", body=None, token=None, bearer=False):
         return exc.code
 
 
-TELEMETRY = json.dumps({"ims": "FWT-02", "version": "v", "ticks": [{"ts": 1, "rows": [[1, 2.0]]}]}).encode()
+TELEMETRY = json.dumps({"ims": "FWT-02", "version": "v", "ticks": [{"ts": 1762223000000, "rows": [[1, 2.0]]}]}).encode()
 
 
 def test_healthz_is_open(agent):

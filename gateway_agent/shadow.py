@@ -351,11 +351,21 @@ class _SchemeCheckedRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def download_tls_context() -> ssl.SSLContext:
+    """Certificate- and hostname-verifying context for package downloads (system CA store)."""
+    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    # These are the defaults for SERVER_AUTH; set explicitly so they can't drift.
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = True
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
 def _download(url: str) -> bytes:
     if urllib.parse.urlsplit(url).scheme not in _allowed_schemes():
         raise ValueError("package URLs must be https")
     opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=ssl.create_default_context()), _SchemeCheckedRedirects()
+        urllib.request.HTTPSHandler(context=download_tls_context()), _SchemeCheckedRedirects()
     )
     # Scheme checked above and on every redirect.
     with opener.open(url, timeout=60) as resp:  # nosec B310

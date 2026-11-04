@@ -41,6 +41,10 @@ server (`tests/conftest.py: FakeIgnition`) and for AWS IoT with an in-memory lin
 | A21 | The inbox only reads regular files. Symlinks are refused without reading their target (opened with `O_NOFOLLOW` and re-checked with `fstat`). Files over the export limit are refused. The inbox directory is mode 0700. | `test_inbox_refuses_symlink_without_reading_target`, `test_inbox_refuses_oversize_file`, `test_inbox_installs_regular_file_after_it_settles` |
 | A22 | Secrets can come from `<NAME>_FILE` (Docker or Kubernetes secrets) instead of the environment, but not both at once. Operator-supplied agent tokens must be 16–128 URL-safe characters. The Ignition API token is refused if it could break out of a request header. | `test_secrets_can_come_from_files`, `test_setting_both_value_and_file_is_an_error`, `test_malformed_operator_token_is_refused`, `test_ignition_token_that_could_break_a_header_is_refused` |
 | A23 | `rotate-tokens` replaces generated tokens atomically (mode 0600) and refuses tokens managed outside the agent. On restart, the new ingest token is written into the publisher (A17). | `test_rotate_tokens_replaces_generated_tokens`, `test_rotate_refuses_externally_managed_token` |
+| A24 | TLS is verified explicitly everywhere: certificate required, hostname checked, TLS 1.2 or later. MQTT trusts only the configured CA (the Amazon root CA). Package downloads use the system CA store and reject an untrusted certificate. | `test_round4.py`: `test_package_download_context_verifies_certificates`, `test_mqtt_context_verifies_server_and_pins_ca`, `test_package_download_rejects_untrusted_certificate` |
+| A25 | The SQLite store never builds SQL from values. Every `execute` takes a constant SQL string with `?` parameters, which is checked over the source's syntax tree, and injection payloads round-trip as plain data. | `test_store_never_builds_sql_from_values`, `test_injection_payloads_are_stored_as_data` |
+| A26 | Telemetry input is fully validated: IMS key and version format, timestamp between 2000 and one day ahead, positive 64-bit `tag_id`, value a number, boolean or string of at most 1,024 characters, at most 1,000 ticks per post and 100,000 readings per tick, non-negative `bad` count. `NaN` and `Infinity` (not valid JSON) are dropped and counted as bad, and the encoder refuses to write them. | `test_nan_and_infinity_are_dropped_and_counted_bad`, `test_invalid_telemetry_is_rejected`, `test_post_size_limits`, `test_valid_post_is_accepted` |
+| A27 | No token value is ever printed by the CLI, and a logging filter masks every configured secret in log messages, arguments and tracebacks. | `test_rotate_tokens_never_prints_token_values`, `test_secret_redaction_masks_messages_args_and_tracebacks` |
 
 ## Verified outside the unit tests
 
@@ -102,6 +106,31 @@ pip-audit -r requirements.txt       # no known vulnerabilities (paho-mqtt 2.1.0)
   the key would have to sit beside them in that same volume, so it would add no protection. The
   volume is private to the agent's uid and the files are 0600.
 * **R3-4** (AEGIS, PR #6, Low, no rotation). Added `gateway-agent rotate-tokens` (A23).
+
+## Changes from review round 4 (R-0012 to R-0017)
+
+* **R4-1, R4-2** (AEGIS, PR #4, Medium, package download TLS not verified). **No defect.** The
+  download already used `ssl.create_default_context()`, which verifies certificates and
+  hostnames. It is now set explicitly (and TLS 1.2 or later is required) in
+  `download_tls_context()`, and a test shows a download from an untrusted certificate fails (A24).
+* **R4-3** (AEGIS, PR #5, Medium, MQTT TLS not explicit). **No defect**, same default. It is now
+  explicit in `iot.tls_context()`, requires TLS 1.2 or later, trusts only the configured CA, and
+  is tested (A24).
+* **R4-4** (AEGIS, PR #5, Medium, possible SQL injection). **No defect.** Every query was already
+  parameterised. A syntax-tree test now enforces it, and injection payloads are tested as data (A25).
+* **R4-5** (AEGIS, PR #5, Medium, telemetry input validation). **A real defect:** a `NaN` or
+  `Infinity` reading was accepted and written out as invalid JSON, which would make the cloud
+  reject the whole message. Such readings are now dropped and counted as bad, the encoder refuses
+  non-finite values, and every field is range- and format-checked (A26).
+* **R4-6** (AEGIS, PR #7, Medium, `rotate-tokens` may expose tokens). **No defect:** only token
+  names are printed. Now tested (A27).
+* **R4-7** (AEGIS, PR #7, Low, secrets in logs). Nothing logged a token, but there was no
+  safeguard. A redaction filter now masks every configured secret in all logs (A27).
+* **Low items on PR #2 and PR #6** described existing controls (escaped literals, name
+  validation, token format check, auth check, body-size limit) with "no action required". They
+  are recorded as confirmations.
+* The PR #3 security review stalled on an escalation claiming its test document was missing.
+  The document was at the stated path, and the escalation was answered so the review resumed.
 
 ## Security-relevant surface for review
 

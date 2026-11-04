@@ -124,6 +124,7 @@ def _run(settings: Settings) -> int:
     except ValueError as exc:
         log.error("configuration error: %s", exc)
         return 2
+    install_secret_redaction([settings.api_token, settings.ingest_token, settings.ignition_api_token])
     store = Store(settings.db_path)
     ignition = IgnitionClient(settings.ignition_url, settings.ignition_api_token)
     installer = Installer(settings, store, ignition)
@@ -170,6 +171,36 @@ def _run(settings: Settings) -> int:
         publisher.stop()
         link.stop()
     return 0
+
+
+class SecretRedactor(logging.Filter):
+    """Replaces any configured secret with *** in every log record, as a backstop: no code path
+    is meant to log a token, but an error message carrying one must not reach the logs."""
+
+    def __init__(self, secrets: list[str]):
+        super().__init__()
+        self.secrets = sorted({s for s in secrets if s and len(s) >= 8}, key=len, reverse=True)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = message
+        for secret in self.secrets:
+            redacted = redacted.replace(secret, "***")
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            for secret in self.secrets:
+                record.exc_text = record.exc_text.replace(secret, "***")
+        return True
+
+
+def install_secret_redaction(secrets: list[str]) -> SecretRedactor:
+    redactor = SecretRedactor(secrets)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(redactor)
+    return redactor
 
 
 class _Offline:
