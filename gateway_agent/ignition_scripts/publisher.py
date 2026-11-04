@@ -30,15 +30,12 @@ def _state(imsKey):
 	return st
 
 
-def _typed(value):
-	# bool before int: Jython's bool is an int subclass.
-	if isinstance(value, bool):
-		return ["b", value]
-	if isinstance(value, (int, long)):
-		return ["i", value]
-	if isinstance(value, float):
-		return ["d", value]
-	return ["s", unicode(value)]
+def _jsonValue(value):
+	# Numbers and booleans go through as-is; anything else (dates, Java objects) as text.
+	# The cloud knows each tag's data type from its tag_id, so no type marker is sent.
+	if isinstance(value, (bool, int, long, float)):
+		return value
+	return unicode(value)
 
 
 def _client():
@@ -64,7 +61,7 @@ def tick(imsKey, version, meta):
 		if not qv.quality.isGood():
 			bad += 1
 			continue
-		rows.append([m[1], m[2], m[3], m[4]] + _typed(qv.value))
+		rows.append([m[1], _jsonValue(qv.value)])
 
 	st["pending"].append({"ts": nowMs, "rows": rows, "bad": bad, "total": len(meta)})
 	overflow = len(st["pending"]) - MAX_PENDING_TICKS

@@ -22,8 +22,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and
 * An AWS IoT thing for the gateway, with an active X.509 certificate that has
   [docs/aws-iot-policy.json](docs/aws-iot-policy.json) attached.
 * An AWS IoT rule named `hyper_telemetry` (or whatever `IOT_TELEMETRY_RULE` is set to) with
-  `FROM 'hyper/+/telemetry'`. Telemetry sent to a rule that doesn't exist is dropped. See
-  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#topics).
+  `FROM 'hyper/+/telemetry'`. Telemetry sent to a rule that doesn't exist is dropped. The
+  payload is compact (`[tag_id, value]` readings), so the rule's action must resolve tags
+  against HAMF before writing `ts.telemetry`. See
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#telemetry-message).
 
 ## Deploy next to Ignition
 

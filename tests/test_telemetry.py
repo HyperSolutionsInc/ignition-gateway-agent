@@ -5,45 +5,69 @@ import pytest
 from gateway_agent.telemetry import Telemetry, TelemetryError
 
 
-def post(n_rows, ts=1762000000000):
+def post(n_rows, ts=1762223000000, bad=1, value=1.5):
     return {
         "ims": "FWT-02",
         "version": "abc",
         "dropped": 0,
-        "ticks": [{"ts": ts, "rows": [[i, 10, None, "ENV", "d", 1.5] for i in range(n_rows)], "bad": 1, "total": n_rows + 1}],
+        "ticks": [{"ts": ts, "rows": [[i, value] for i in range(n_rows)], "bad": bad, "total": n_rows + bad}],
     }
 
 
-def test_rows_become_ts_telemetry_shape(settings, store):
+def messages(store):
+    return [json.loads(p) for _, _, p in store.peek(1000)]
+
+
+def test_compact_envelope(settings, store):
     t = Telemetry(settings, store)
     assert t.accept(post(2)) == 2
-    (_, ims, payload), = store.peek(10)
-    msg = json.loads(payload)
-    assert ims == "FWT-02"
-    assert (msg["v"], msg["gw"], msg["ims"], msg["pkg"]) == (1, "gw-test", "FWT-02", "abc")
-    assert msg["rows"][0] == {
-        "ts": "2025-11-01T12:26:40.000+00:00", "tag_id": 0, "asset_id": 10, "producer_id": None, "ims_id": "ENV",
-        "value_double": 1.5, "value_int": None, "value_bool": None, "value_string": None,
+    (msg,) = messages(store)
+    assert msg == {
+        "v": 2, "gw": "gw-test", "ims": "FWT-02", "pkg": "abc",
+        "ticks": [{"ts": 1762223000000, "bad": 1, "r": [[0, 1.5], [1, 1.5]]}],
     }
     assert t.last_tick["FWT-02"]["good"] == 2 and t.last_tick["FWT-02"]["bad"] == 1
+    assert store.outbox_stats()["rows"] == 2
 
 
-def test_value_kinds(settings, store):
-    t = Telemetry(settings, store)
+def test_value_types_pass_through(settings, store):
     body = post(0)
-    body["ticks"][0]["rows"] = [[1, 1, None, "D", "i", 7], [2, 1, None, "D", "b", True], [3, 1, None, "D", "s", "on"]]
-    t.accept(body)
-    rows = json.loads(store.peek(1)[0][2])["rows"]
-    assert (rows[0]["value_int"], rows[1]["value_bool"], rows[2]["value_string"]) == (7, True, "on")
+    body["ticks"][0]["rows"] = [[1, 7], [2, True], [3, "Closed"], [4, 0.25]]
+    Telemetry(settings, store).accept(body)
+    assert messages(store)[0]["ticks"][0]["r"] == [[1, 7], [2, True], [3, "Closed"], [4, 0.25]]
 
 
-def test_messages_are_packed_under_limit(settings, store):
+def test_reading_is_much_smaller_than_column_form(settings, store):
+    Telemetry(settings, store).accept(post(1000, value=41.25))
+    (_, _, payload), = store.peek(1)
+    assert len(payload) / 1000 < 20
+
+
+def test_several_ticks_share_a_message(settings, store):
+    body = post(3)
+    body["ticks"].append({"ts": 1762223001000, "rows": [[9, 2.0]], "bad": 0, "total": 1})
+    Telemetry(settings, store).accept(body)
+    (msg,) = messages(store)
+    assert [t["ts"] for t in msg["ticks"]] == [1762223000000, 1762223001000]
+
+
+def test_large_tick_is_split_with_same_ts(settings, store):
     settings.max_message_bytes = 2000
-    Telemetry(settings, store).accept(post(100))
-    msgs = store.peek(100)
+    Telemetry(settings, store).accept(post(1000, bad=5))
+    msgs = messages(store)
     assert len(msgs) > 1
-    assert all(len(p) <= 2000 for _, _, p in msgs)
-    assert sum(len(json.loads(p)["rows"]) for _, _, p in msgs) == 100
+    assert all(len(json.dumps(m, separators=(",", ":"))) <= 2000 for m in msgs)
+    ticks = [t for m in msgs for t in m["ticks"]]
+    assert {t["ts"] for t in ticks} == {1762223000000}
+    assert [r[0] for t in ticks for r in t["r"]] == list(range(1000))
+    assert sum(t["bad"] for t in ticks) == 5  # counted once, not per split
+
+
+def test_empty_tick_still_updates_health(settings, store):
+    t = Telemetry(settings, store)
+    assert t.accept(post(0, bad=4)) == 0
+    assert store.peek(1) == []
+    assert t.last_tick["FWT-02"]["bad"] == 4
 
 
 def test_buffer_cap_drops_oldest(settings, store):
@@ -64,9 +88,13 @@ def test_basic_ingest_topic(settings):
     assert settings.package_topic("request") == "hyper/gw-test/package/request"
 
 
-def test_malformed(settings, store):
-    t = Telemetry(settings, store)
+@pytest.mark.parametrize("body", [
+    {"ims": "x"},
+    {"ims": "x", "ticks": [{"ts": 1, "rows": [[1, 2, 3]]}]},
+    {"ims": "x", "ticks": [{"ts": 1, "rows": [["1", 2]]}]},
+    {"ims": "x", "ticks": [{"ts": 1, "rows": [[1, {"nested": 1}]]}]},
+    {"ims": "x", "ticks": [{"ts": "soon", "rows": []}]},
+])
+def test_malformed(settings, store, body):
     with pytest.raises(TelemetryError):
-        t.accept({"ims": "x"})
-    with pytest.raises(TelemetryError):
-        t.accept({"ims": "x", "ticks": [{"ts": 1, "rows": [[1, 2]]}]})
+        Telemetry(settings, store).accept(body)

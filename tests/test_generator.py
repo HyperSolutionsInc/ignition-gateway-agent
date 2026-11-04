@@ -43,7 +43,7 @@ def test_meta_module_round_trips():
     assert ns["IMS_KEY"] == "FWT-02"
     assert ns["VERSION"] == pkg.version
     rows = ns["meta"]()
-    assert rows[0] == ["[default]Switch/Petersburg/ACI/FWT-02/PPM/ENV/Temperature", 100, 10, None, "ENV"]
+    assert rows[0] == ["[default]Switch/Petersburg/ACI/FWT-02/PPM/ENV/Temperature", 100]
     assert len(rows) == 4
 
 
