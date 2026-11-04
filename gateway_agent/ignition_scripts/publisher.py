@@ -9,7 +9,9 @@
 #
 # Written to parse as both Jython 2.7 and Python 3 so the agent's test suite can check it.
 
-AGENT_URL = "__AGENT_URL__/v1/telemetry"
+AGENT_URL = __AGENT_BASE_URL__ + "/v1/telemetry"
+# Grants telemetry posts only; the agent's admin endpoints use a different token.
+INGEST_TOKEN = __INGEST_TOKEN__
 MAX_PENDING_TICKS = 600  # per IMS; at a 1 s interval this is 10 minutes of readings
 MAX_TICKS_PER_POST = 30
 WARN_EVERY_MS = 60000
@@ -83,7 +85,8 @@ def _flush(imsKey, version, st, nowMs):
 			"ticks": batch,
 		})
 		try:
-			resp = _client().post(AGENT_URL, data=body, headers={"Content-Type": "application/json"})
+			resp = _client().post(AGENT_URL, data=body, headers={
+				"Content-Type": "application/json", "X-Agent-Token": INGEST_TOKEN})
 			ok = resp.good
 		except Exception as e:
 			ok = False

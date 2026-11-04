@@ -1,12 +1,15 @@
 import ast
 import json
 
+import pytest
+
 from gateway_agent import generator, hamf
 from conftest import ims_tree, to_bytes
 
 
 def render(pkg, **kw):
-    opts = dict(provider="default", tag_root="", agent_url="http://gateway-agent:8600/", interval_ms=1000)
+    opts = dict(provider="default", tag_root="", agent_url="http://gateway-agent:8600/",
+                ingest_token="ingest-token-0123456789abcdef", interval_ms=1000)
     opts.update(kw)
     return generator.render(pkg, **opts)
 
@@ -73,9 +76,28 @@ def test_timer_resource_settings():
     assert res["attributes"]["sharedThread"] is False
 
 
-def test_publisher_parses_and_has_agent_url():
-    files = generator.shared_project_files("http://gateway-agent:8600/")
+def test_publisher_parses_and_has_agent_url_and_token():
+    files = generator.shared_project_files("http://gateway-agent:8600/", "ingest-token-0123456789abcdef")
     source = files["ignition/script-python/hyper/publisher/code.py"].decode()
     ast.parse(source)
-    assert 'AGENT_URL = "http://gateway-agent:8600/v1/telemetry"' in source
+    assert 'AGENT_URL = "http://gateway-agent:8600" + "/v1/telemetry"' in source
+    assert 'INGEST_TOKEN = "ingest-token-0123456789abcdef"' in source
+    assert '"X-Agent-Token": INGEST_TOKEN' in source
     assert json.loads(files["project.json"])["enabled"] is True
+
+
+@pytest.mark.parametrize("url", [
+    'http://x"+__import__("os").system("id")+"',
+    "file:///etc/passwd",
+    "http://host/path?q=1",
+    "ftp://host",
+])
+def test_publisher_rejects_unsafe_agent_url(url):
+    with pytest.raises(ValueError):
+        generator.shared_project_files(url, "ingest-token-0123456789abcdef")
+
+
+@pytest.mark.parametrize("token", ['abc"+os.system("id")+"0123456789', "short", "has space 0123456789abc"])
+def test_publisher_rejects_unsafe_token(token):
+    with pytest.raises(ValueError):
+        generator.shared_project_files("http://gateway-agent:8600", token)

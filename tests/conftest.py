@@ -121,6 +121,8 @@ def settings(tmp_path: Path, fake_ignition):
     s.ims_path_depth = 4
     s.timer_interval_ms = 1000
     s.agent_url_for_ignition = "http://gateway-agent:8600"
+    s.api_token = "admin-token-0123456789abcdef"
+    s.ingest_token = "ingest-token-0123456789abcdef"
     return s
 
 

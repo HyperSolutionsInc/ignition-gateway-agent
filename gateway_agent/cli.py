@@ -20,6 +20,7 @@ import signal
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -61,22 +62,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     settings = Settings()
     agent = args.agent_url or "http://127.0.0.1:%d" % settings.http_port
+    token = settings.read_api_token()
 
     if args.cmd == "run":
         return _run(settings)
     if args.cmd == "import":
         name = urllib.request.quote(args.file.name)
         query = "?filename=%s" % name + ("&ims=%s" % urllib.request.quote(args.ims) if args.ims else "")
-        return _call(agent, "POST", "/v1/packages" + query, args.file.read_bytes())
+        return _call(agent, token, "POST", "/v1/packages" + query, args.file.read_bytes())
     if args.cmd == "list":
-        return _call(agent, "GET", "/v1/packages")
+        return _call(agent, token, "GET", "/v1/packages")
     if args.cmd == "remove":
-        return _call(agent, "DELETE", "/v1/packages/" + urllib.request.quote(args.ims, safe=""))
+        return _call(agent, token, "DELETE", "/v1/packages/" + urllib.request.quote(args.ims, safe=""))
     if args.cmd == "set":
         body = json.dumps({"enabled": args.enabled, "interval_ms": args.interval_ms}).encode()
-        return _call(agent, "PATCH", "/v1/packages/" + urllib.request.quote(args.ims, safe=""), body)
+        return _call(agent, token, "PATCH", "/v1/packages/" + urllib.request.quote(args.ims, safe=""), body)
     if args.cmd == "status":
-        return _call(agent, "GET", "/v1/status")
+        return _call(agent, token, "GET", "/v1/status")
     if args.cmd == "render":
         return _render(settings, args.file, args.out_dir, args.ims)
     if args.cmd == "check-iot":
@@ -98,6 +100,7 @@ def _run(settings: Settings) -> int:
 
     log = logging.getLogger("gateway_agent")
     log.info("gateway-agent %s starting", __version__)
+    settings.ensure_tokens()
     store = Store(settings.db_path)
     ignition = IgnitionClient(settings.ignition_url, settings.ignition_api_token)
     installer = Installer(settings, store, ignition)
@@ -123,7 +126,13 @@ def _run(settings: Settings) -> int:
         publisher.start()
         link.start()
 
-    server = make_server(settings.http_host, settings.http_port, telemetry=telemetry, installer=installer, status=health)
+    try:
+        installer.refresh_shared()
+    except Exception:
+        log.exception("could not refresh shared project files; will retry on the next install")
+
+    server = make_server(settings.http_host, settings.http_port, telemetry=telemetry, installer=installer,
+                         status=health, api_token=settings.api_token, ingest_token=settings.ingest_token)
     serve_in_background(server)
     Inbox(settings.inbox_dir, installer).start()
     log.info("HTTP API on %s:%d, inbox %s", settings.http_host, settings.http_port, settings.inbox_dir)
@@ -191,10 +200,17 @@ def _check_iot(settings: Settings, timeout: float) -> int:
     return 0 if ok else 1
 
 
-def _call(agent: str, method: str, path: str, body: bytes | None = None) -> int:
-    req = urllib.request.Request(agent + path, data=body, method=method)
+def _call(agent: str, token: str, method: str, path: str, body: bytes | None = None) -> int:
+    if urllib.parse.urlsplit(agent).scheme not in ("http", "https"):
+        print("--agent-url must be http:// or https://", file=sys.stderr)
+        return 2
+    if not token:
+        print("no admin token: set AGENT_API_TOKEN or run inside the agent container", file=sys.stderr)
+        return 2
+    req = urllib.request.Request(agent + path, data=body, method=method, headers={"X-Agent-Token": token})
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        # Scheme checked above; the path is built from fixed endpoints.
+        with urllib.request.urlopen(req, timeout=300) as resp:  # nosec B310
             print(json.dumps(json.loads(resp.read()), indent=2))
             return 0
     except urllib.error.HTTPError as exc:

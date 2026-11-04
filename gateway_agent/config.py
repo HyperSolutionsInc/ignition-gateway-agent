@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,21 @@ def _env(name: str, default: str = "") -> str:
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     return int(raw) if raw not in (None, "") else default
+
+
+def _load_or_create_secret(path: Path) -> str:
+    try:
+        value = path.read_text().strip()
+        if value:
+            return value
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = secrets.token_urlsafe(32)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(value + "\n")
+    return value
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -44,8 +60,16 @@ class Settings:
     timer_interval_ms: int = field(default_factory=lambda: _env_int("TIMER_INTERVAL_MS", 1000))
 
     # Local HTTP API: timer scripts post telemetry here; operators post HAMF packages here.
-    http_host: str = field(default_factory=lambda: _env("AGENT_HTTP_HOST", "0.0.0.0"))
+    # Inside the container it has to listen on all interfaces so the Ignition container can reach
+    # it over the Docker network; the compose file publishes it on loopback only, and every
+    # endpoint except /healthz requires a token.
+    http_host: str = field(default_factory=lambda: _env("AGENT_HTTP_HOST", "0.0.0.0"))  # nosec B104
     http_port: int = field(default_factory=lambda: _env_int("AGENT_HTTP_PORT", 8600))
+    # Admin token for package management and status; ingest token for timer-script telemetry
+    # (it is written into the gateway project, so it is kept separate and grants nothing else).
+    # Generated on first start and kept in the state directory when not set explicitly.
+    api_token: str = field(default_factory=lambda: _env("AGENT_API_TOKEN"))
+    ingest_token: str = field(default_factory=lambda: _env("AGENT_INGEST_TOKEN"))
     # URL the Ignition timer scripts use to reach this agent.
     agent_url_for_ignition: str = field(
         default_factory=lambda: _env("AGENT_URL_FOR_IGNITION", "http://gateway-agent:8600")
@@ -88,6 +112,21 @@ class Settings:
     def package_topic(self, kind: str) -> str:
         """hyper/<thing>/package/request (gateway -> cloud) or .../chunk (cloud -> gateway)."""
         return "hyper/%s/package/%s" % (self.thing_name, kind)
+
+    def ensure_tokens(self) -> None:
+        """Fill api_token / ingest_token from the state directory, creating them if needed."""
+        for attr, filename in (("api_token", "api_token"), ("ingest_token", "ingest_token")):
+            if not getattr(self, attr):
+                setattr(self, attr, _load_or_create_secret(self.state_dir / filename))
+
+    def read_api_token(self) -> str:
+        """The admin token for CLI calls: from the environment, else the state directory."""
+        if self.api_token:
+            return self.api_token
+        try:
+            return (self.state_dir / "api_token").read_text().strip()
+        except OSError:
+            return ""
 
     @property
     def inbox_dir(self) -> Path:
