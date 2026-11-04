@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,10 @@ def _env_int(name: str, default: int) -> int:
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{16,128}")
+# RFC 1123 hostname: dot-separated labels of letters, digits and inner hyphens.
+_HOSTNAME_RE = re.compile(r"(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*")
+# AWS IoT thing names and client ids.
+_CLIENT_ID_RE = re.compile(r"[A-Za-z0-9:_\-]{1,128}")
 
 
 def _env_secret(name: str) -> str:
@@ -48,13 +53,30 @@ def _load_or_create_secret(path: Path) -> str:
 
 
 def _write_secret(path: Path, value: str) -> None:
-    """Write a secret readable only by the agent user, replacing any old file atomically."""
+    """Write a secret readable only by the agent user, replacing any old file atomically.
+
+    On any failure the temporary file is removed and the old secret is left in place. After the
+    swap the file is read back and its permissions checked, so a rotation never reports success
+    with a secret that is missing, different, or readable by others.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name("." + path.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(value + "\n")
-    os.replace(tmp, path)
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(value + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if path.read_text().strip() != value or mode & 0o077:
+        raise OSError("secret %s did not verify after writing (mode %o)" % (path, mode))
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -129,6 +151,16 @@ class Settings:
     @property
     def mqtt_client_id(self) -> str:
         return self.client_id or self.thing_name
+
+    def validate_iot(self) -> None:
+        """IOT_ENDPOINT is a bare hostname (MQTT over TLS on IOT_PORT), never a URL."""
+        if not _HOSTNAME_RE.fullmatch(self.iot_endpoint or ""):
+            raise ValueError("IOT_ENDPOINT must be a hostname such as abc123-ats.iot.us-east-2.amazonaws.com "
+                             "(no scheme, port or path), got %r" % self.iot_endpoint)
+        if not 1 <= self.iot_port <= 65535:
+            raise ValueError("IOT_PORT must be 1-65535, got %r" % self.iot_port)
+        if not _CLIENT_ID_RE.fullmatch(self.mqtt_client_id or ""):
+            raise ValueError("IOT_THING_NAME / IOT_CLIENT_ID must be 1-128 characters of A-Z a-z 0-9 : _ -")
 
     @property
     def telemetry_publish_topic(self) -> str:

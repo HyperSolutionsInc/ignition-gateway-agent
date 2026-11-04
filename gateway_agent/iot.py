@@ -33,6 +33,7 @@ class IotLink:
     def __init__(self, settings: Settings):
         import paho.mqtt.client as mqtt  # imported here so the rest of the agent runs without it
 
+        settings.validate_iot()
         self.settings = settings
         self._mqtt = mqtt
         self._handlers: list[tuple[str, MessageHandler]] = []

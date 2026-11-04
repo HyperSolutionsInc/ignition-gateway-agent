@@ -137,7 +137,11 @@ def _run(settings: Settings) -> int:
             return 2
         from .iot import IotLink, Publisher
 
-        link = IotLink(settings)
+        try:
+            link = IotLink(settings)
+        except (OSError, ValueError) as exc:
+            log.error("cannot set up the AWS IoT link: %s", exc)
+            return 2
         publisher = Publisher(settings, store, link)
 
     def health() -> dict[str, Any]:

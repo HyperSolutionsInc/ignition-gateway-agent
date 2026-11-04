@@ -1,6 +1,7 @@
 """Controls confirmed or added after review round 4 (R-0014, R-0015): TLS, SQL, telemetry input."""
 
 import ast
+import os
 import json
 import math
 import shutil
@@ -193,3 +194,55 @@ def test_secret_redaction_masks_messages_args_and_tracebacks():
     text = stream.getvalue()
     assert secret not in text
     assert text.count("***") >= 3
+
+
+# ---------------------------------------------------------------- round 5 (R-0024): rotation storage, IoT endpoint
+
+def test_failed_secret_write_leaves_old_secret_and_no_temp_file(tmp_path, monkeypatch):
+    from gateway_agent import config
+    target = tmp_path / "api_token"
+    config._write_secret(target, "old-token-0123456789abcdef")
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config.os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        config._write_secret(target, "new-token-0123456789abcdef")
+    assert target.read_text().strip() == "old-token-0123456789abcdef"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_secret_write_is_verified(tmp_path, monkeypatch):
+    from gateway_agent import config
+    real_replace = config.os.replace
+
+    def replace_and_loosen(src, dst):
+        real_replace(src, dst)
+        os.chmod(dst, 0o644)  # simulate a filesystem that ignores the requested mode
+
+    monkeypatch.setattr(config.os, "replace", replace_and_loosen)
+    with pytest.raises(OSError, match="did not verify"):
+        config._write_secret(tmp_path / "t", "token-0123456789abcdef")
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://abc-ats.iot.us-east-2.amazonaws.com", "abc-ats.iot.us-east-2.amazonaws.com:8883",
+    "abc-ats.iot.us-east-2.amazonaws.com/path", "", "bad host", "-leading.example.com", "a..b",
+])
+def test_iot_endpoint_must_be_a_bare_hostname(settings, endpoint):
+    settings.iot_endpoint = endpoint
+    with pytest.raises(ValueError, match="IOT_ENDPOINT"):
+        settings.validate_iot()
+
+
+def test_iot_settings_validation(settings):
+    settings.iot_endpoint = "a27n1c51bedgc5-ats.iot.us-east-2.amazonaws.com"
+    settings.validate_iot()
+    settings.iot_port = 0
+    with pytest.raises(ValueError, match="IOT_PORT"):
+        settings.validate_iot()
+    settings.iot_port = 8883
+    settings.thing_name, settings.client_id = "gw/../x", ""
+    with pytest.raises(ValueError, match="IOT_THING_NAME"):
+        settings.validate_iot()

@@ -45,6 +45,7 @@ server (`tests/conftest.py: FakeIgnition`) and for AWS IoT with an in-memory lin
 | A25 | The SQLite store never builds SQL from values. Every `execute` takes a constant SQL string with `?` parameters, which is checked over the source's syntax tree, and injection payloads round-trip as plain data. | `test_store_never_builds_sql_from_values`, `test_injection_payloads_are_stored_as_data` |
 | A26 | Telemetry input is fully validated: IMS key and version format, timestamp between 2000 and one day ahead, positive 64-bit `tag_id`, value a number, boolean or string of at most 1,024 characters, at most 1,000 ticks per post and 100,000 readings per tick, non-negative `bad` count. `NaN` and `Infinity` (not valid JSON) are dropped and counted as bad, and the encoder refuses to write them. | `test_nan_and_infinity_are_dropped_and_counted_bad`, `test_invalid_telemetry_is_rejected`, `test_post_size_limits`, `test_valid_post_is_accepted` |
 | A27 | No token value is ever printed by the CLI, and a logging filter masks every configured secret in log messages, arguments and tracebacks. | `test_rotate_tokens_never_prints_token_values`, `test_secret_redaction_masks_messages_args_and_tracebacks` |
+| A28 | Secret writes are atomic and verified: on failure the old secret stays and no temp file is left, and after writing, the content and 0600 mode are checked. `IOT_ENDPOINT` must be a bare DNS hostname (no scheme, port or path), `IOT_PORT` must be 1–65535, and the thing name/client id must be AWS-valid, checked before any connection is made. | `test_round4.py`: `test_failed_secret_write_leaves_old_secret_and_no_temp_file`, `test_secret_write_is_verified`, `test_iot_endpoint_must_be_a_bare_hostname`, `test_iot_settings_validation` |
 
 ## Verified outside the unit tests
 
@@ -131,6 +132,19 @@ pip-audit -r requirements.txt       # no known vulnerabilities (paho-mqtt 2.1.0)
   are recorded as confirmations.
 * The PR #3 security review stalled on an escalation claiming its test document was missing.
   The document was at the stated path, and the escalation was answered so the review resumed.
+
+## Changes from review round 5 (R-0019 to R-0024)
+
+All twelve reviews passed. AEGIS's pass on PR #7 still listed two Medium items, which were
+addressed:
+
+* **R5-1** (`rotate-tokens` storage). Tokens were already written atomically with mode 0600
+  (A23). Now a failed write removes its temp file and keeps the old secret, and every write is
+  read back and its mode checked before success is reported (A28).
+* **R5-2** (`check-iot` "URL scheme"). `IOT_ENDPOINT` is a hostname, not a URL, so CWE-601 doesn't
+  apply. It is now validated as a bare hostname, along with the port and the client id, before
+  any connection (A28).
+* The other Low items on PR #3 and PR #5 confirmed existing controls ("no action required").
 
 ## Security-relevant surface for review
 
