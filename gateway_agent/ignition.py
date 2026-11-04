@@ -34,6 +34,8 @@ class IgnitionError(RuntimeError):
 
 class IgnitionClient:
     def __init__(self, base_url: str, api_token: str, timeout: float = 30.0):
+        if urllib.parse.urlsplit(base_url).scheme not in ("http", "https"):
+            raise ValueError("IGNITION_URL must be http:// or https://, got %r" % base_url)
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
         self.timeout = timeout
@@ -98,7 +100,8 @@ class IgnitionClient:
                 raise IgnitionError("IGNITION_API_TOKEN is not set; create an API key in the gateway")
             req.add_header("X-Ignition-API-Token", self.api_token)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            # base_url's scheme is checked in __init__ and path/query are built here, never taken from input.
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # nosec B310
                 return resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read()[:500].decode("utf-8", "replace")

@@ -51,8 +51,10 @@ Choose whichever path suits the site:
 docker cp FWT-02.edge-config.zip gateway-agent:/tmp/
 docker exec gateway-agent gateway-agent import /tmp/FWT-02.edge-config.zip
 
-# 2. HTTP
-curl --data-binary @FWT-02.edge-config.zip "http://127.0.0.1:8600/v1/packages?filename=FWT-02.edge-config.zip"
+# 2. HTTP (admin token: AGENT_API_TOKEN, or generated into the state volume on first start)
+TOKEN=$(docker exec gateway-agent cat /var/lib/gateway-agent/api_token)
+curl -H "X-Agent-Token: $TOKEN" --data-binary @FWT-02.edge-config.zip \
+  "http://127.0.0.1:8600/v1/packages?filename=FWT-02.edge-config.zip"
 
 # 3. Drop folder: anything copied into <state>/inbox is installed, then moved to inbox/done or inbox/failed
 docker cp FWT-02.edge-config.zip gateway-agent:/var/lib/gateway-agent/inbox/
@@ -75,7 +77,24 @@ gateway-agent render export.zip out/        # write the generated artifacts only
 ```
 
 `render` output can also be imported by hand: `out/project` is an Ignition project folder,
-and `out/tags/<mod>.json` is a Designer tag import for the `importPath` it names.
+and `out/tags/<mod>.json` is a Designer tag import for the `importPath` it names. Unless
+`AGENT_INGEST_TOKEN` is set, the rendered publisher holds the placeholder
+`REPLACE_WITH_AGENT_INGEST_TOKEN`; replace it with the agent's ingest token before importing.
+
+## API authentication
+
+Every endpoint except `/healthz` needs a token, sent as `X-Agent-Token` or
+`Authorization: Bearer`:
+
+* **Admin token** (`AGENT_API_TOKEN`): package import, list, set, remove, and status. The CLI
+  inside the container reads it from the state volume.
+* **Ingest token** (`AGENT_INGEST_TOKEN`): `POST /v1/telemetry` only. It is written into the
+  generated `hyper.publisher` script, so anyone who can read the gateway project can see it.
+  That is why it grants nothing else.
+
+Either one is generated (32 random bytes, mode 0600) in the state volume on first start if it
+isn't set. To rotate the ingest token, set or delete it and restart the agent: on startup the
+agent rewrites the publisher and asks the gateway to rescan.
 
 ## Configuration
 

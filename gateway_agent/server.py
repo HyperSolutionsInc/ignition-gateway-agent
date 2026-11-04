@@ -8,12 +8,15 @@
   GET    /v1/status              health summary (same content the shadow reports)
   GET    /healthz                liveness
 
-The API is meant for the gateway's own Docker network: publish its port on loopback or the
+Every endpoint except /healthz needs a token in the X-Agent-Token header (or
+`Authorization: Bearer`). /v1/telemetry takes the ingest token, which the generated publisher
+script carries; everything else takes the admin token. Publish the port on loopback or the
 plant LAN only.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import threading
@@ -37,7 +40,12 @@ def make_server(
     telemetry: Telemetry,
     installer: Installer,
     status: Callable[[], dict[str, Any]],
+    api_token: str,
+    ingest_token: str,
 ) -> ThreadingHTTPServer:
+    if not api_token or not ingest_token:
+        raise ValueError("the HTTP API needs both an admin and an ingest token")
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "gateway-agent"
 
@@ -48,6 +56,8 @@ def make_server(
             path = self._path()
             if path == "/healthz":
                 return self._send(200, {"ok": True})
+            if not self._authorized(api_token):
+                return
             if path == "/v1/status":
                 return self._send(200, status())
             if path == "/v1/packages":
@@ -56,6 +66,8 @@ def make_server(
 
         def do_POST(self) -> None:
             path = self._path()
+            if not self._authorized(ingest_token if path == "/v1/telemetry" else api_token):
+                return
             body = self._body()
             if body is None:
                 return
@@ -79,6 +91,8 @@ def make_server(
             return self._send(404, {"error": "not found"})
 
         def do_PATCH(self) -> None:
+            if not self._authorized(api_token):
+                return
             ims = self._ims_from_path()
             body = self._body()
             if ims is None or body is None:
@@ -91,6 +105,8 @@ def make_server(
             return self._send(200, result.__dict__)
 
         def do_DELETE(self) -> None:
+            if not self._authorized(api_token):
+                return
             ims = self._ims_from_path()
             if ims is None:
                 return
@@ -98,6 +114,16 @@ def make_server(
             return self._send(200 if removed else 404, {"removed": removed})
 
         # -------------------------------------------------------- helpers
+
+        def _authorized(self, expected: str) -> bool:
+            presented = self.headers.get("X-Agent-Token") or ""
+            auth = self.headers.get("Authorization") or ""
+            if not presented and auth.lower().startswith("bearer "):
+                presented = auth[7:].strip()
+            if presented and hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
+                return True
+            self._send(401, {"error": "missing or invalid token"})
+            return False
 
         def _path(self) -> str:
             return urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"

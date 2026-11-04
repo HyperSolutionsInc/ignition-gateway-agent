@@ -7,9 +7,9 @@ ARG APP_GID=2003
 RUN groupadd -g ${APP_GID} ignition && useradd -u ${APP_UID} -g ${APP_GID} -M -s /usr/sbin/nologin agent
 
 WORKDIR /app
-COPY pyproject.toml ./
+COPY pyproject.toml requirements.txt ./
 COPY gateway_agent ./gateway_agent
-RUN pip install --no-cache-dir . && rm -rf /root/.cache
+RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir --no-deps . && rm -rf /root/.cache
 
 RUN mkdir -p /var/lib/gateway-agent && chown ${APP_UID}:${APP_GID} /var/lib/gateway-agent
 VOLUME ["/var/lib/gateway-agent"]

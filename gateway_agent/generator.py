@@ -20,6 +20,7 @@ is the failure the hand-written timer scripts had to work around.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any
@@ -53,6 +54,7 @@ def render(
     provider: str,
     tag_root: str,
     agent_url: str,
+    ingest_token: str,
     interval_ms: int,
     enabled: bool = True,
 ) -> Artifacts:
@@ -72,7 +74,7 @@ def render(
         "ignition/timer/ims_%s/handleTimerEvent.py" % module: _timer_script(module).encode("utf-8"),
         "ignition/timer/ims_%s/resource.json" % module: _timer_resource(interval_ms, enabled),
     }
-    shared_files = shared_project_files(agent_url)
+    shared_files = shared_project_files(agent_url, ingest_token)
 
     manifest = {
         "ims": pkg.ims_key,
@@ -98,9 +100,15 @@ def render(
     )
 
 
-def shared_project_files(agent_url: str) -> dict[str, bytes]:
+def shared_project_files(agent_url: str, ingest_token: str) -> dict[str, bytes]:
+    if not re.fullmatch(r"https?://[A-Za-z0-9.\-]+(:[0-9]{1,5})?/?", agent_url):
+        raise ValueError("AGENT_URL_FOR_IGNITION must be http(s)://host[:port], got %r" % agent_url)
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{16,128}", ingest_token):
+        raise ValueError("the ingest token must be 16-128 URL-safe characters")
     publisher = resources.files("gateway_agent.ignition_scripts").joinpath("publisher.py").read_text("utf-8")
-    publisher = publisher.replace("__AGENT_URL__", agent_url.rstrip("/"))
+    # Inserted as escaped literals so no value can alter the generated code.
+    publisher = publisher.replace("__AGENT_BASE_URL__", json.dumps(agent_url.rstrip("/")))
+    publisher = publisher.replace("__INGEST_TOKEN__", json.dumps(ingest_token))
     return {
         "project.json": _json(
             {

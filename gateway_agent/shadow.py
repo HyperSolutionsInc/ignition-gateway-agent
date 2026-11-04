@@ -29,6 +29,7 @@ import shutil
 import ssl
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any, Callable
@@ -337,11 +338,27 @@ def _timer_settings_changed(manifest: dict[str, Any], desired: dict[str, Any]) -
     )
 
 
+def _allowed_schemes() -> tuple[str, ...]:
+    return ("https", "http") if os.environ.get("ALLOW_HTTP_PACKAGE_URLS") == "1" else ("https",)
+
+
+class _SchemeCheckedRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to the allowed schemes (no https -> http, file:, ftp:)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme not in _allowed_schemes():
+            raise ValueError("package URL redirected to a disallowed scheme: %s" % newurl.split("?", 1)[0])
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _download(url: str) -> bytes:
-    if not url.startswith("https://") and os.environ.get("ALLOW_HTTP_PACKAGE_URLS") != "1":
+    if urllib.parse.urlsplit(url).scheme not in _allowed_schemes():
         raise ValueError("package URLs must be https")
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(url, timeout=60, context=ctx if url.startswith("https://") else None) as resp:
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()), _SchemeCheckedRedirects()
+    )
+    # Scheme checked above and on every redirect.
+    with opener.open(url, timeout=60) as resp:  # nosec B310
         data = resp.read(MAX_PACKAGE_BYTES + 1)
     if len(data) > MAX_PACKAGE_BYTES:
         raise ValueError("package exceeds %d bytes" % MAX_PACKAGE_BYTES)

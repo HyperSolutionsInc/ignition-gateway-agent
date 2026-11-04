@@ -25,6 +25,9 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
+# Not a credential: a marker written into hand-import renders in place of the real token.
+RENDER_PLACEHOLDER_TOKEN = "REPLACE_WITH_AGENT_INGEST_TOKEN"  # nosec B105
+
 
 @dataclass
 class InstallResult:
@@ -111,9 +114,14 @@ class Installer:
             return True
 
     def render_to(self, data: bytes, filename: str, out_dir: Path, ims_key: str | None = None) -> generator.Artifacts:
-        """Write the artifacts for an export to a folder, without touching the gateway."""
+        """Write the artifacts for an export to a folder, without touching the gateway.
+
+        Unless AGENT_INGEST_TOKEN is set, the publisher gets a placeholder token to replace
+        before a hand import, since render must not create or reveal the live one.
+        """
         pkg = hamf.load(data, filename, self.settings.ims_path_depth, ims_key)
-        art = self._render(pkg, True, self.settings.timer_interval_ms)
+        art = self._render(pkg, True, self.settings.timer_interval_ms,
+                           ingest_token=self.settings.ingest_token or RENDER_PLACEHOLDER_TOKEN)
         project = out_dir / "project"
         for rel, content in {**art.shared_files, **art.ims_files}.items():
             _write_atomic(project / rel, content)
@@ -126,12 +134,34 @@ class Installer:
 
     # ------------------------------------------------------------ internals
 
-    def _render(self, pkg: hamf.Package, enabled: bool, interval_ms: int) -> generator.Artifacts:
+    def refresh_shared(self) -> bool:
+        """Rewrite the shared project files if they are stale (e.g. a rotated ingest token).
+
+        Returns True when files changed and the gateway was asked to rescan.
+        """
+        if not any(p["status"] == "installed" for p in self.store.packages()):
+            return False
+        with self._lock:
+            changed = False
+            for rel, content in generator.shared_project_files(
+                self.settings.agent_url_for_ignition, self.settings.ingest_token
+            ).items():
+                path = self.settings.project_dir / rel
+                if not path.exists() or path.read_bytes() != content:
+                    _write_atomic(path, content)
+                    changed = True
+            if changed:
+                self.ignition.scan_projects()
+                log.info("shared project files refreshed")
+            return changed
+
+    def _render(self, pkg: hamf.Package, enabled: bool, interval_ms: int, ingest_token: str | None = None) -> generator.Artifacts:
         return generator.render(
             pkg,
             provider=self.settings.tag_provider,
             tag_root=self.settings.tag_root,
             agent_url=self.settings.agent_url_for_ignition,
+            ingest_token=ingest_token if ingest_token is not None else self.settings.ingest_token,
             interval_ms=interval_ms,
             enabled=enabled,
         )
