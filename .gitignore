@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+
+# Secrets and per-site config
+deploy/.env
+deploy/certs/
+deploy/secrets/
+*.pem
+*.key
+*.crt
+
+# HAMF exports carry real site data; keep them out of the repo
+*.ignition.json
+*.edge-config*.zip
+out/
