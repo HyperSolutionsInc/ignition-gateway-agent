@@ -1,0 +1,44 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ConnectAsOwnThing",
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:us-east-2:*:client/${iot:Connection.Thing.ThingName}"
+    },
+    {
+      "Sid": "PublishTelemetryShadowAndPackageRequests",
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": [
+        "arn:aws:iot:us-east-2:*:topic/$aws/rules/hyper_telemetry/hyper/${iot:Connection.Thing.ThingName}/telemetry",
+        "arn:aws:iot:us-east-2:*:topic/hyper/${iot:Connection.Thing.ThingName}/telemetry",
+        "arn:aws:iot:us-east-2:*:topic/hyper/${iot:Connection.Thing.ThingName}/package/request",
+        "arn:aws:iot:us-east-2:*:topic/$aws/things/${iot:Connection.Thing.ThingName}/shadow/name/*/get",
+        "arn:aws:iot:us-east-2:*:topic/$aws/things/${iot:Connection.Thing.ThingName}/shadow/name/*/update"
+      ]
+    },
+    {
+      "Sid": "SubscribeShadowAndPackageChunks",
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": [
+        "arn:aws:iot:us-east-2:*:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/shadow/name/+/get/accepted",
+        "arn:aws:iot:us-east-2:*:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/shadow/name/+/get/rejected",
+        "arn:aws:iot:us-east-2:*:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/shadow/name/+/update/delta",
+        "arn:aws:iot:us-east-2:*:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/shadow/name/+/update/rejected",
+        "arn:aws:iot:us-east-2:*:topicfilter/hyper/${iot:Connection.Thing.ThingName}/package/chunk"
+      ]
+    },
+    {
+      "Sid": "ReceiveShadowAndPackageChunks",
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": [
+        "arn:aws:iot:us-east-2:*:topic/$aws/things/${iot:Connection.Thing.ThingName}/shadow/name/*",
+        "arn:aws:iot:us-east-2:*:topic/hyper/${iot:Connection.Thing.ThingName}/package/chunk"
+      ]
+    }
+  ]
+}
