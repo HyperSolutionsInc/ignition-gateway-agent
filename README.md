@@ -74,7 +74,11 @@ gateway-agent set FWT-02 --disable          # or --enable, --interval-ms 5000
 gateway-agent remove FWT-02                 # timer, library script and tag folder
 gateway-agent status                        # same health the shadow reports
 gateway-agent render export.zip out/        # write the generated artifacts only, no gateway
+gateway-agent rotate-tokens                 # new generated API tokens; restart to apply
 ```
+
+Exports are limited to 64 MB, 500 zip members and 256 MB uncompressed, and tag or folder names
+that could change a tag path (`/`, `[`, `]`, `..`) are refused.
 
 `render` output can also be imported by hand: `out/project` is an Ignition project folder,
 and `out/tags/<mod>.json` is a Designer tag import for the `importPath` it names. Unless
@@ -93,8 +97,19 @@ Every endpoint except `/healthz` needs a token, sent as `X-Agent-Token` or
   That is why it grants nothing else.
 
 Either one is generated (32 random bytes, mode 0600) in the state volume on first start if it
-isn't set. To rotate the ingest token, set or delete it and restart the agent: on startup the
-agent rewrites the publisher and asks the gateway to rescan.
+isn't set. Any of `AGENT_API_TOKEN`, `AGENT_INGEST_TOKEN` and `IGNITION_API_TOKEN` can instead
+be read from a file with the `_FILE` suffix (for example `AGENT_API_TOKEN_FILE=/run/secrets/agent_api_token`
+with Docker secrets; see the commented block in `deploy/docker-compose.yml`).
+
+To rotate generated tokens:
+
+```bash
+docker exec gateway-agent gateway-agent rotate-tokens      # or --admin / --ingest
+docker restart gateway-agent
+```
+
+On startup the agent writes the new ingest token into the publisher and asks the gateway to
+rescan. Tokens supplied through the environment or `_FILE` are rotated where they are managed.
 
 ## Configuration
 

@@ -9,6 +9,7 @@ dist/
 # Secrets and per-site config
 deploy/.env
 deploy/certs/
+deploy/secrets/
 *.pem
 *.key
 *.crt

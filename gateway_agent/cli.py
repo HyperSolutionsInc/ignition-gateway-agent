@@ -8,6 +8,8 @@
   gateway-agent render FILE OUT_DIR       write the generated Ignition artifacts to a folder only
   gateway-agent status                    health summary from the running agent
   gateway-agent check-iot                 connect to AWS IoT with the configured certificate
+  gateway-agent rotate-tokens [--admin] [--ingest]
+                                          replace generated API tokens (both by default); restart to apply
 """
 
 from __future__ import annotations
@@ -54,13 +56,20 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status")
     p = sub.add_parser("check-iot")
     p.add_argument("--timeout", type=float, default=15.0)
+    p = sub.add_parser("rotate-tokens")
+    p.add_argument("--admin", action="store_true", help="rotate only the admin token")
+    p.add_argument("--ingest", action="store_true", help="rotate only the ingest token")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    settings = Settings()
+    try:
+        settings = Settings()
+    except ValueError as exc:
+        print("configuration error: %s" % exc, file=sys.stderr)
+        return 2
     agent = args.agent_url or "http://127.0.0.1:%d" % settings.http_port
     token = settings.read_api_token()
 
@@ -83,6 +92,16 @@ def main(argv: list[str] | None = None) -> int:
         return _render(settings, args.file, args.out_dir, args.ims)
     if args.cmd == "check-iot":
         return _check_iot(settings, args.timeout)
+    if args.cmd == "rotate-tokens":
+        both = not (args.admin or args.ingest)
+        try:
+            rotated = settings.rotate_tokens(admin=both or args.admin, ingest=both or args.ingest)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print("rotated %s. Restart the agent to apply; it then rewrites the gateway publisher and rescans."
+              % " and ".join(rotated))
+        return 0
     return 2
 
 
@@ -100,7 +119,11 @@ def _run(settings: Settings) -> int:
 
     log = logging.getLogger("gateway_agent")
     log.info("gateway-agent %s starting", __version__)
-    settings.ensure_tokens()
+    try:
+        settings.ensure_tokens()
+    except ValueError as exc:
+        log.error("configuration error: %s", exc)
+        return 2
     store = Store(settings.db_path)
     ignition = IgnitionClient(settings.ignition_url, settings.ignition_api_token)
     installer = Installer(settings, store, ignition)

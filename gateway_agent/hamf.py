@@ -30,6 +30,18 @@ PROVIDER = "Provider"
 
 IDENTITY_FIELDS = ("tag_id", "asset_id", "asset_path", "signal_path")
 
+# Input limits. An export is untrusted input (it can arrive over HTTP, the inbox or the shadow),
+# so sizes are capped before parsing and zip members are read with bounded reads that don't
+# trust the sizes the archive declares (zip-bomb protection). The real 25-device FWT-02 export
+# is 2.8 MB uncompressed.
+MAX_EXPORT_BYTES = 64 * 1024 * 1024
+MAX_ZIP_MEMBERS = 500
+MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_NAME_LENGTH = 255
+# A tag or folder name becomes one segment of an Ignition tag path, so it must not be able to
+# add segments ("/"), name a provider ("[", "]"), or walk the tree ("." / "..").
+_UNSAFE_NAME = re.compile(r"[/\[\]\x00-\x1f\x7f]")
+
 
 class HamfError(ValueError):
     pass
@@ -87,6 +99,8 @@ def module_name_for(ims_key: str) -> str:
 
 def load(data: bytes, filename: str = "", ims_path_depth: int = 4, ims_key: str | None = None) -> Package:
     """Load a HAMF export (JSON or zip bytes) as a single-IMS package."""
+    if len(data) > MAX_EXPORT_BYTES:
+        raise HamfError("export is %d bytes; the limit is %d" % (len(data), MAX_EXPORT_BYTES))
     documents = list(_documents(data, filename))
     if not documents:
         raise HamfError("no HAMF export JSON found in %s" % (filename or "upload"))
@@ -124,14 +138,37 @@ def load(data: bytes, filename: str = "", ims_path_depth: int = 4, ims_key: str 
 
 def _documents(data: bytes, filename: str) -> Iterable[tuple[str, Any]]:
     if data[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            for info in sorted(zf.infolist(), key=lambda i: i.filename):
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile as exc:
+            raise HamfError("%s is not a valid zip: %s" % (filename or "upload", exc)) from exc
+        with zf:
+            members = zf.infolist()
+            if len(members) > MAX_ZIP_MEMBERS:
+                raise HamfError("zip has %d members; the limit is %d" % (len(members), MAX_ZIP_MEMBERS))
+            budget = MAX_UNCOMPRESSED_BYTES
+            for info in sorted(members, key=lambda i: i.filename):
                 base = info.filename.rsplit("/", 1)[-1]
                 if info.is_dir() or not base.lower().endswith(".json") or base.startswith("."):
                     continue
-                yield info.filename, _parse_json(zf.read(info), info.filename)
+                raw = _read_member(zf, info, budget)
+                budget -= len(raw)
+                yield info.filename, _parse_json(raw, info.filename)
         return
     yield filename or "upload.json", _parse_json(data, filename)
+
+
+def _read_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo, budget: int) -> bytes:
+    """Read one member, stopping as soon as the remaining uncompressed budget is exceeded."""
+    try:
+        with zf.open(info) as fh:
+            raw = fh.read(budget + 1)
+    except (RuntimeError, zipfile.BadZipFile, NotImplementedError, OSError) as exc:
+        # RuntimeError: encrypted member; NotImplementedError: unsupported compression
+        raise HamfError("cannot read %s from the zip: %s" % (info.filename, exc)) from exc
+    if len(raw) > budget:
+        raise HamfError("zip expands past %d bytes; refusing it" % MAX_UNCOMPRESSED_BYTES)
+    return raw
 
 
 def _parse_json(raw: bytes, name: str) -> Any:
@@ -163,6 +200,7 @@ def _merge_into(target: list[dict[str, Any]], nodes: list[dict[str, Any]], at: t
         name = node.get("name")
         if not isinstance(name, str) or not name:
             raise HamfError("%s: unnamed node under /%s" % (src, "/".join(at)))
+        _check_name(name, at, src)
         path = at + (name,)
         existing = index.get(name)
         if kind == FOLDER:
@@ -182,6 +220,14 @@ def _merge_into(target: list[dict[str, Any]], nodes: list[dict[str, Any]], at: t
                 raise HamfError("%s: conflicting definitions for tag /%s" % (src, "/".join(path)))
         else:
             raise HamfError("%s: unsupported tagType %r at /%s" % (src, kind, "/".join(path)))
+
+
+def _check_name(name: str, at: tuple[str, ...], src: str) -> None:
+    where = "/".join(at + (name,))
+    if len(name) > MAX_NAME_LENGTH:
+        raise HamfError("%s: name longer than %d characters under /%s" % (src, MAX_NAME_LENGTH, "/".join(at)))
+    if _UNSAFE_NAME.search(name) or name in (".", "..") or name != name.strip():
+        raise HamfError("%s: unsafe tag or folder name %r at /%s" % (src, name, where))
 
 
 def _walk_leaves(nodes: list[dict[str, Any]], at: tuple[str, ...]) -> Iterable[Leaf]:

@@ -25,6 +25,21 @@ services:
       - "${AGENT_PUBLISH_ADDR:-127.0.0.1}:8600:8600"
     networks:
       - ignition
+    # Optional: supply tokens as Docker secrets instead of environment variables. Uncomment this
+    # and the top-level `secrets:` block, then set AGENT_API_TOKEN_FILE=/run/secrets/agent_api_token
+    # (and the others) in .env.
+    # secrets:
+    #   - agent_api_token
+    #   - agent_ingest_token
+    #   - ignition_api_token
+
+# secrets:
+#   agent_api_token:
+#     file: ./secrets/agent_api_token
+#   agent_ingest_token:
+#     file: ./secrets/agent_ingest_token
+#   ignition_api_token:
+#     file: ./secrets/ignition_api_token
 
 volumes:
   ignition-data:

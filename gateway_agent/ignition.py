@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +29,9 @@ ENDPOINTS = {
 }
 
 
+_TOKEN_RE = re.compile(r"[\x21-\x7e]{8,1024}")
+
+
 class IgnitionError(RuntimeError):
     pass
 
@@ -36,6 +40,9 @@ class IgnitionClient:
     def __init__(self, base_url: str, api_token: str, timeout: float = 30.0):
         if urllib.parse.urlsplit(base_url).scheme not in ("http", "https"):
             raise ValueError("IGNITION_URL must be http:// or https://, got %r" % base_url)
+        # The token goes into a request header: refuse anything that could break out of it.
+        if api_token and not _TOKEN_RE.fullmatch(api_token):
+            raise ValueError("IGNITION_API_TOKEN must be 8-1024 printable characters with no spaces")
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
         self.timeout = timeout

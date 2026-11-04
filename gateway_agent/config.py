@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,23 @@ def _env_int(name: str, default: int) -> int:
     return int(raw) if raw not in (None, "") else default
 
 
+TOKEN_RE = re.compile(r"[A-Za-z0-9_\-]{16,128}")
+
+
+def _env_secret(name: str) -> str:
+    """A secret from NAME, or from the file named by NAME_FILE (e.g. /run/secrets/...)."""
+    value = os.environ.get(name, "")
+    path = os.environ.get(name + "_FILE", "")
+    if value and path:
+        raise ValueError("set %s or %s_FILE, not both" % (name, name))
+    if path:
+        try:
+            return Path(path).read_text().strip()
+        except OSError as exc:
+            raise ValueError("cannot read %s_FILE (%s): %s" % (name, path, exc)) from exc
+    return value
+
+
 def _load_or_create_secret(path: Path) -> str:
     try:
         value = path.read_text().strip()
@@ -24,12 +42,19 @@ def _load_or_create_secret(path: Path) -> str:
             return value
     except FileNotFoundError:
         pass
-    path.parent.mkdir(parents=True, exist_ok=True)
     value = secrets.token_urlsafe(32)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    _write_secret(path, value)
+    return value
+
+
+def _write_secret(path: Path, value: str) -> None:
+    """Write a secret readable only by the agent user, replacing any old file atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name("." + path.name + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(value + "\n")
-    return value
+    os.replace(tmp, path)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -48,7 +73,7 @@ class Settings:
     # resources can be written in place, and the REST API is used to import tags and
     # trigger a project rescan (so no gateway restart is needed).
     ignition_url: str = field(default_factory=lambda: _env("IGNITION_URL", "http://ignition:8088"))
-    ignition_api_token: str = field(default_factory=lambda: _env("IGNITION_API_TOKEN"))
+    ignition_api_token: str = field(default_factory=lambda: _env_secret("IGNITION_API_TOKEN"))
     ignition_data_dir: Path = field(default_factory=lambda: Path(_env("IGNITION_DATA_DIR", "/ignition-data")))
     ignition_project: str = field(default_factory=lambda: _env("IGNITION_PROJECT", "hyper-gateway"))
     tag_provider: str = field(default_factory=lambda: _env("IGNITION_TAG_PROVIDER", "default"))
@@ -67,9 +92,10 @@ class Settings:
     http_port: int = field(default_factory=lambda: _env_int("AGENT_HTTP_PORT", 8600))
     # Admin token for package management and status; ingest token for timer-script telemetry
     # (it is written into the gateway project, so it is kept separate and grants nothing else).
-    # Generated on first start and kept in the state directory when not set explicitly.
-    api_token: str = field(default_factory=lambda: _env("AGENT_API_TOKEN"))
-    ingest_token: str = field(default_factory=lambda: _env("AGENT_INGEST_TOKEN"))
+    # Each can come from the environment, from a file named by <NAME>_FILE (Docker/Kubernetes
+    # secrets), or, if neither is set, is generated on first start into the state directory.
+    api_token: str = field(default_factory=lambda: _env_secret("AGENT_API_TOKEN"))
+    ingest_token: str = field(default_factory=lambda: _env_secret("AGENT_INGEST_TOKEN"))
     # URL the Ignition timer scripts use to reach this agent.
     agent_url_for_ignition: str = field(
         default_factory=lambda: _env("AGENT_URL_FOR_IGNITION", "http://gateway-agent:8600")
@@ -118,6 +144,26 @@ class Settings:
         for attr, filename in (("api_token", "api_token"), ("ingest_token", "ingest_token")):
             if not getattr(self, attr):
                 setattr(self, attr, _load_or_create_secret(self.state_dir / filename))
+            if not TOKEN_RE.fullmatch(getattr(self, attr)):
+                raise ValueError("AGENT_%s must be 16-128 characters of A-Z a-z 0-9 _ -" % attr.upper())
+
+    def rotate_tokens(self, admin: bool, ingest: bool) -> list[str]:
+        """Replace generated tokens in the state directory. Returns the names rotated.
+
+        Tokens supplied through the environment or a secrets file are managed outside the agent
+        and are refused here. The running agent picks the new tokens up on restart, and then
+        rewrites the gateway publisher with the new ingest token.
+        """
+        rotated = []
+        for wanted, env, filename in ((admin, "AGENT_API_TOKEN", "api_token"),
+                                      (ingest, "AGENT_INGEST_TOKEN", "ingest_token")):
+            if not wanted:
+                continue
+            if os.environ.get(env) or os.environ.get(env + "_FILE"):
+                raise ValueError("%s is set externally; rotate it where it is managed" % env)
+            _write_secret(self.state_dir / filename, secrets.token_urlsafe(32))
+            rotated.append(filename)
+        return rotated
 
     def read_api_token(self) -> str:
         """The admin token for CLI calls: from the environment, else the state directory."""

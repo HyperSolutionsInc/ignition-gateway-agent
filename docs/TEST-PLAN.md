@@ -37,6 +37,10 @@ server (`tests/conftest.py: FakeIgnition`) and for AWS IoT with an in-memory lin
 | A17 | Missing tokens are generated once (32 random bytes, file mode 0600) and reused on restart. A rotated ingest token is rewritten into the publisher and the gateway is rescanned. `render` never embeds the live token. | `test_tokens_are_generated_once_with_private_permissions`, `test_refresh_shared_rewrites_publisher_after_token_rotation`, `test_render_does_not_embed_the_live_token` |
 | A18 | Values written into generated Jython (agent URL, ingest token) are validated and inserted as escaped literals, so they can't inject code. | `test_generator.py`: `test_publisher_rejects_unsafe_agent_url`, `test_publisher_rejects_unsafe_token` |
 | A19 | URL fetches only use http(s). The Ignition URL must be http(s). Package downloads must be HTTPS (unless `ALLOW_HTTP_PACKAGE_URLS=1`) and won't follow a redirect to any other scheme. | `test_ignition_client_rejects_non_http_schemes`, `test_package_download_requires_https`, `test_package_download_refuses_redirect_to_other_scheme` |
+| A20 | HAMF input is size-limited before parsing: 64 MB per export, at most 500 zip members, and 256 MB of uncompressed content across all members, enforced by bounded reads that ignore the sizes the zip declares (zip-bomb protection). A corrupt zip is a clean error. Tag and folder names that could alter a tag path (`/`, `[`, `]`, `.`, `..`, control characters, edge whitespace, more than 255 characters) are refused, and real-world names are accepted. | `test_hardening.py`: `test_export_over_size_limit_is_refused`, `test_zip_bomb_is_stopped_by_bounded_read`, `test_uncompressed_budget_is_shared_across_members`, `test_too_many_zip_members`, `test_corrupt_zip_is_a_clean_error`, `test_unsafe_names_are_refused`, `test_unsafe_folder_name_is_refused`, `test_real_world_names_are_accepted` |
+| A21 | The inbox only reads regular files. Symlinks are refused without reading their target (opened with `O_NOFOLLOW` and re-checked with `fstat`). Files over the export limit are refused. The inbox directory is mode 0700. | `test_inbox_refuses_symlink_without_reading_target`, `test_inbox_refuses_oversize_file`, `test_inbox_installs_regular_file_after_it_settles` |
+| A22 | Secrets can come from `<NAME>_FILE` (Docker or Kubernetes secrets) instead of the environment, but not both at once. Operator-supplied agent tokens must be 16–128 URL-safe characters. The Ignition API token is refused if it could break out of a request header. | `test_secrets_can_come_from_files`, `test_setting_both_value_and_file_is_an_error`, `test_malformed_operator_token_is_refused`, `test_ignition_token_that_could_break_a_header_is_refused` |
+| A23 | `rotate-tokens` replaces generated tokens atomically (mode 0600) and refuses tokens managed outside the agent. On restart, the new ingest token is written into the publisher (A17). | `test_rotate_tokens_replaces_generated_tokens`, `test_rotate_refuses_externally_managed_token` |
 
 ## Verified outside the unit tests
 
@@ -84,6 +88,20 @@ pip-audit -r requirements.txt       # no known vulnerabilities (paho-mqtt 2.1.0)
 * Added a pinned `requirements.txt`, so pip-audit scans the runtime dependencies (the Grid
   scan skips `pyproject.toml`). The image installs from it.
 * This test document is filed with the review. *(PROBE)*
+
+## Changes from review round 3 (R-0006 to R-0011)
+
+* **R3-1** (AEGIS, PR #3, Medium, inbox file handling). Export files are only parsed, never
+  executed. The real gaps were unbounded reads and zip decompression and followed symlinks, and
+  all three are closed (A20, A21). Tag and folder names that could change a tag path are
+  refused (A20).
+* **R3-2** (AEGIS, PR #3, Medium, API token validation). The Ignition API token is validated so
+  it can't inject a header. Operator-supplied agent tokens are validated too (A22).
+* **R3-3** (AEGIS, PR #6, Medium, tokens stored unencrypted). Tokens can now come from a
+  secret store through `*_FILE` (A22). They aren't encrypted at rest inside the state volume:
+  the key would have to sit beside them in that same volume, so it would add no protection. The
+  volume is private to the agent's uid and the files are 0600.
+* **R3-4** (AEGIS, PR #6, Low, no rotation). Added `gateway-agent rotate-tokens` (A23).
 
 ## Security-relevant surface for review
 
