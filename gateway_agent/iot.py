@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import ssl
 import threading
 import time
@@ -41,6 +42,11 @@ class IotLink:
         self.connected = threading.Event()
         self.connected_since: float | None = None
         self.last_disconnect_reason: str | None = None
+        # Handlers run here, not on paho's network thread: a handler that publishes and waits
+        # for the PUBACK would otherwise block the thread that delivers it (seen live: every
+        # shadow delta stalled all MQTT traffic for 10 s and timed out a report).
+        self._inbound: queue.Queue = queue.Queue()
+        threading.Thread(target=self._dispatch, name="iot-dispatch", daemon=True).start()
 
         client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
@@ -111,12 +117,17 @@ class IotLink:
         log.warning("disconnected from AWS IoT: %s", reason_code)
 
     def _handle_message(self, client, userdata, msg) -> None:
-        for topic_filter, handler in self._handlers:
-            if self._mqtt.topic_matches_sub(topic_filter, msg.topic):
-                try:
-                    handler(msg.topic, msg.payload)
-                except Exception:
-                    log.exception("handler for %s failed", msg.topic)
+        self._inbound.put((msg.topic, msg.payload))
+
+    def _dispatch(self) -> None:
+        while True:
+            topic, payload = self._inbound.get()
+            for topic_filter, handler in list(self._handlers):
+                if self._mqtt.topic_matches_sub(topic_filter, topic):
+                    try:
+                        handler(topic, payload)
+                    except Exception:
+                        log.exception("handler for %s failed", topic)
 
 
 class Publisher(threading.Thread):

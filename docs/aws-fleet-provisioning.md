@@ -4,6 +4,10 @@ A new gateway gets its identity from AWS IoT **fleet provisioning by claim**, an
 from Device Shadows. Everything below is set up once per AWS account (region `us-east-2`),
 not once per gateway.
 
+[`tools/aws_setup.sh`](../tools/aws_setup.sh) does sections 1–4 in one run and writes the claim
+certificate to `./claim/`. Its telemetry rule archives to S3 (as in the end-to-end test,
+docs/TEST-PLAN.md); point the rule at the consumer for production.
+
 ## 1. Gateway policy
 
 Create the IoT policy `hyper-gateway` from [`aws-iot-policy.json`](aws-iot-policy.json). It
@@ -94,3 +98,8 @@ Lambda) can call the tool, or port it.
 python tools/publish_ims.py --thing hyper-gw-SN-0042 --bucket <bucket> FWT-03.export.json
 python tools/publish_ims.py --thing hyper-gw-SN-0042 --remove FWT-03
 ```
+
+The download URL is presigned for `--url-ttl`, but a URL signed with temporary credentials
+(SSO, an assumed role) stops working when they expire. Run the tool with credentials that
+outlast the gateway's download. Telemetry is delivered at least once, so the consumer should
+de-duplicate on `(gw, ims, ts)`.

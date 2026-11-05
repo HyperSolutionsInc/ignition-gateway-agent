@@ -25,7 +25,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design,
 Put the fleet claim certificate in `docker/claim/` (see its README), then:
 
 ```bash
-docker build -t hyper-gateway:0.2.0 \
+docker build -t hyper-gateway:0.2.1 \
   --build-arg IOT_ENDPOINT=<account>-ats.iot.us-east-2.amazonaws.com \
   --build-arg IOT_PROVISIONING_TEMPLATE=hyper-gateway-fleet .
 ```
@@ -42,7 +42,7 @@ or, without compose:
 
 ```bash
 docker run -d --name gateway --restart unless-stopped -p 8088:8088 -p 8043:8043 \
-  -v gateway-data:/usr/local/bin/ignition/data -v gateway-agent:/var/lib/gateway-agent hyper-gateway:0.2.0
+  -v gateway-data:/usr/local/bin/ignition/data -v gateway-agent:/var/lib/gateway-agent hyper-gateway:0.2.1
 ```
 
 First boot takes about a minute: Ignition starts once to create its configuration, the agent

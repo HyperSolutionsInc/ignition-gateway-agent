@@ -51,6 +51,9 @@ server (`tests/conftest.py: FakeIgnition`) and for AWS IoT with an in-memory lin
 | A31 | The REST client matches Ignition 8.3.7's API. Tags are imported as the IMS folder node, sent as `application/octet-stream`, and a reported `failureCount` is an error. Restart uses `restart-tasks/restart?confirm=true`. | `test_round4.py`: `test_import_reports_gateway_side_failures`, `test_restart_uses_restart_tasks_with_confirm`; `test_installer.py`: `test_install_writes_project_and_calls_gateway` |
 | A32 | Tags dropped by an update, and a removed IMS's folder, are deleted from the tag-definition files (8.3.7 has no REST delete, and Overwrite keeps them), followed by a config scan. Deletion can't leave the tag-definition tree. | `test_update_deletes_dropped_tags`, `test_update_that_drops_one_tag_keeps_its_neighbours`, `test_remove`, `test_tag_deletion_cannot_escape_the_tag_definitions` |
 | A33 | An install fails, and is recorded as failed, if Ignition doesn't load the project after the rescan. Generated resources carry no `lastModification` (8.3.7 skips a project whose `lastModification` has no timestamp). A tag with a null value isn't sent. | `test_install_fails_if_ignition_does_not_load_the_project`, `test_generated_resources_carry_no_lastmodification`, `test_publisher_parses_and_has_agent_url_and_token` |
+| A34 | MQTT message handlers run on their own dispatch thread, never on paho's network thread, so a handler that publishes and waits for its PUBACK can't stall the link. | `test_shadow.py`: `test_iot_handlers_run_off_the_network_thread` |
+| A35 | The interim `downloading` report is pinned to the shadow document version it was read at, so if AWS applies it after the final report it is rejected (409, not an error) instead of overwriting the final status. Every desired key the cloud sets, `remove: false` included, is mirrored so the delta clears. | `test_interim_report_is_pinned_to_document_version`, `test_version_conflict_on_update_is_not_an_error`, `test_install_from_inline_source` |
+| A36 | A generated gateway serial is `auto-<12 hex>`, so the thing is `hyper-gw-auto-…`. | `test_provisioning.py` |
 
 ## Verified outside the unit tests
 
@@ -64,14 +67,54 @@ Run once on the Kingdel lab gateway (Ignition 8.3.7):
   before round 1. Telemetry now also needs the ingest token, which is covered by
   `test_security.py`.)*
 
-## Not testable yet
+## End to end on AWS (sandbox, 2026-11-05)
 
-* **The live Ignition REST endpoints** (`gateway_agent/ignition.py: ENDPOINTS`). The gateway
-  has no API key yet, so the paths are unverified against its `/openapi` listing.
-* **The live AWS IoT connection, shadows and Basic Ingest rule.** The available device
-  certificate completes TLS but AWS closes the MQTT connection, and the rule doesn't exist yet.
-* **The Jython publisher at runtime** (`gateway_agent/ignition_scripts/publisher.py`). It is
-  compile-checked under Python 3 and Jython, but it only runs inside a live gateway.
+Run on Kingdel against the sandbox account (379549361391, us-east-2), with the AWS side built by
+the steps now in [`tools/aws_setup.sh`](../tools/aws_setup.sh) (the run named its roles and bucket
+`hyper-gw-e2e-…`). For the test, the `hyper_telemetry` rule
+writes each message to S3 (`telemetry/<thing>/…`), standing in for the consumer. The test IMSs
+are synthetic exports whose tags are Ignition expression and memory tags, so they have values
+without a PLC.
+
+| # | Step | Result |
+|---|---|---|
+| E1 | Start a fresh container with only `GATEWAY_SERIAL=E2E-0001`. | Pass. First boot, API key and permissions took 32 s. The gateway provisioned itself as `hyper-gw-E2E-0001` (certificate ACTIVE, policy `hyper-gateway`) and connected about 55 s after start. |
+| E2 | Health on the `gateway` shadow. | Pass. Reported every 60 s: Ignition RUNNING, link, outbox, certificate expiry, disk. |
+| E3 | Assign IMS E2E-01 with `publish_ims.py` (S3 plus shadows). | Pass after fixes F1–F3. Installed 3 tags under `[default]Switch/Petersburg/ACI/E2E-01`, and the shadow reads `installed` with an empty delta. |
+| E4 | Telemetry reaches the cloud through Basic Ingest. | Pass after F4. Payload-v2 messages arrive in S3 with live values, about one per second per IMS, and the outbox stays at 0. |
+| E5 | Update E2E-01 (adds a tag) and add a second IMS, E2E-02. | Pass. Both installed within 2 s, and telemetry carries the new tag (9003) and the second IMS. |
+| E6 | Network outage: container disconnected for 60 s. | Pass. 120 readings buffered, then replayed with no gap: 70 ticks in the 70 s window around the outage. |
+| E7 | Remove E2E-02. | Pass. Its tags and timer are gone from Ignition, and its shadow reads `removed`. |
+| E8 | Remote restart request with `ALLOW_REMOTE_RESTART` off. | Pass (refused). Reported as `restart_refused`; the desired key stays in the delta until the cloud clears it. |
+| E9 | Image upgrade: new image, same volumes. | Pass. No first-boot steps and no re-provisioning; it reconnected as the same thing, and IMSs and tokens were kept. |
+| E10 | Second container with no serial. | Pass after F5. It generated a serial and provisioned itself. |
+
+Found and fixed during the run:
+
+* **F1.** `publish_ims.py` presigned URLs on S3's global hostname. For a new bucket S3 redirects
+  to the regional host, which breaks the signature (403). The tool now signs against
+  `s3.<region>.amazonaws.com`.
+* **F2.** A fast failure was overwritten by the interim `downloading` report, because AWS
+  applied the two updates out of order. That report is now version-pinned (A35).
+* **F3.** `remove: false` was never mirrored, so a delta stayed open forever (A35).
+* **F4.** MQTT handlers ran on paho's network thread. A shadow delta handler waited there for
+  its own PUBACK, which stalled the whole link for 10 s at a time. The outbox backed up (94
+  messages) and timed-out publishes were sent twice. Handlers now have their own thread (A34).
+* **F5.** A generated serial started with `gw-`, giving `hyper-gw-gw-…` (A36).
+
+For the consumer: delivery is at least once, and the run saw duplicate ticks before F4. De-duplicate
+on `(gw, ims, ts)`.
+
+## Still open
+
+* **HAMF Modbus addressing.** Real HAMF tags (`[device]3/<reg>` with no `valueSource`) become
+  memory tags with null values in Ignition. The export needs OPC tags on a Modbus device
+  connection. See the handbook.
+* **The telemetry consumer** (rule action to `ts.telemetry`). The test used S3.
+* **Presigned URL lifetime.** A URL signed with temporary (SSO or role) credentials dies when
+  those credentials expire, whatever `--url-ttl` says. Whatever runs `publish_ims.py` in production
+  should sign with a long-lived role. The gateway also retries only when the shadow changes, so
+  an expired URL needs a re-publish.
 
 ## Static checks
 

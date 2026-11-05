@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # for gateway_agent.hamf
 
 import boto3  # noqa: E402
+from botocore.config import Config  # noqa: E402
 
 from gateway_agent import hamf  # noqa: E402
 from gateway_agent.shadow import ims_shadow_name  # noqa: E402
@@ -72,7 +73,10 @@ def main() -> int:
     sha = hashlib.sha256(data).hexdigest()
     key = "%s/%s/%s/%s%s" % (args.prefix, args.thing, pkg.ims_key, sha, "".join(args.export.suffixes[-1:]))
 
-    s3 = boto3.client("s3", region_name=args.region)
+    # Sign against the regional endpoint. A URL on the global one (bucket.s3.amazonaws.com) is
+    # redirected to the region for a new bucket, and the redirect breaks the signature (403).
+    s3 = boto3.client("s3", region_name=args.region, endpoint_url="https://s3.%s.amazonaws.com" % args.region,
+                      config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))
     s3.put_object(Bucket=args.bucket, Key=key, Body=data, ServerSideEncryption="AES256")
     url = s3.generate_presigned_url("get_object", Params={"Bucket": args.bucket, "Key": key}, ExpiresIn=args.url_ttl)
 

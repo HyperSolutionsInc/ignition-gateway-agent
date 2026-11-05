@@ -116,7 +116,8 @@ class ShadowAgent:
     def _on_document(self, topic: str, payload: bytes) -> None:
         doc = json.loads(payload or b"{}")
         state = doc.get("state") or {}
-        self._work.put((_shadow_name(topic), state.get("desired") or {}, state.get("reported") or {}))
+        self._work.put((_shadow_name(topic), state.get("desired") or {}, state.get("reported") or {},
+                        doc.get("version")))
 
     def _on_rejected(self, topic: str, payload: bytes) -> None:
         name = _shadow_name(topic)
@@ -126,6 +127,10 @@ class ShadowAgent:
             err = {"message": payload[:200].decode("utf-8", "replace")}
         if err.get("code") == 404 and topic.endswith("get/rejected"):
             return  # shadow not created yet; nothing desired
+        if err.get("code") == 409 and topic.endswith("update/rejected"):
+            # A versioned interim report lost to a newer update (see _apply_ims): expected.
+            log.debug("shadow %s: stale interim report dropped", name)
+            return
         self.last_error = "shadow %s: %s" % (name, err.get("message"))
         log.warning("shadow %s rejected: %s", name, err)
 
@@ -144,12 +149,12 @@ class ShadowAgent:
 
     def _worker(self) -> None:
         while True:
-            name, desired, reported = self._work.get()
+            name, desired, reported, version = self._work.get()
             try:
                 if name == GATEWAY_SHADOW:
                     self._apply_gateway(desired, reported)
                 elif name.startswith("ims-"):
-                    self._apply_ims(name, desired, reported)
+                    self._apply_ims(name, desired, reported, version)
             except Exception as exc:
                 self.last_error = "%s: %s" % (name, exc)
                 log.exception("applying shadow %s failed", name)
@@ -185,7 +190,8 @@ class ShadowAgent:
         if update:
             self._report(GATEWAY_SHADOW, update)
 
-    def _apply_ims(self, name: str, desired: dict[str, Any], reported: dict[str, Any]) -> None:
+    def _apply_ims(self, name: str, desired: dict[str, Any], reported: dict[str, Any],
+                   doc_version: int | None = None) -> None:
         ims = self._names.get(name) or name[len("ims-"):]
         if not desired:
             return
@@ -197,7 +203,8 @@ class ShadowAgent:
             self._report(name, {"remove": True, "status": "removed", "error": None, "applied_at": _now()})
             return
 
-        mirror = {k: desired.get(k) for k in ("version", "sha256", "filename", "enabled", "interval_ms")}
+        # Mirror every desired key the cloud sets (remove: false included), or the delta never clears.
+        mirror = {k: desired.get(k) for k in ("version", "sha256", "filename", "enabled", "interval_ms", "remove")}
         local_sha = self.store.get("shadow_sha:" + ims)
         installed = local is not None and local["status"] == "installed"
 
@@ -205,7 +212,10 @@ class ShadowAgent:
             if desired.get("sha256") and (desired["sha256"] != local_sha or not installed):
                 if not desired.get("source"):
                     return  # the cloud will set a source; nothing to fetch yet
-                self._report(name, {"status": "downloading", "error": None})
+                # AWS can apply two quick updates out of order (seen live: a fast failure was
+                # overwritten by this report). Pinned to the document version it was read at, it
+                # is rejected (409) if the final report gets there first.
+                self._report(name, {"status": "downloading", "error": None}, version=doc_version)
                 data = self._fetch(ims, desired)
                 result = self.installer.install(
                     data,
@@ -275,12 +285,16 @@ class ShadowAgent:
 
     # ------------------------------------------------------------ outbound
 
-    def _report(self, name: str, reported: dict[str, Any], clear_source: bool = False) -> None:
+    def _report(self, name: str, reported: dict[str, Any], clear_source: bool = False,
+                version: int | None = None) -> None:
         state: dict[str, Any] = {"reported": reported}
         if clear_source:
             # Presigned URLs and inline blobs are single-use; clearing them keeps the delta empty.
             state["desired"] = {"source": None}
-        body = json.dumps({"state": state}).encode("utf-8")
+        update: dict[str, Any] = {"state": state}
+        if version is not None:
+            update["version"] = version
+        body = json.dumps(update).encode("utf-8")
         if not self.link.publish(self.topic(name, "update"), body, qos=1):
             log.warning("could not report shadow %s (offline)", name)
 

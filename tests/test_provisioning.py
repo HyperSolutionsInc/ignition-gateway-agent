@@ -145,4 +145,4 @@ def test_no_claim_means_no_identity(settings):
 def test_generated_serial_is_kept(settings):
     settings.gateway_serial = ""
     first = provisioning.gateway_serial(settings)
-    assert first.startswith("gw-") and provisioning.gateway_serial(settings) == first
+    assert first.startswith("auto-") and provisioning.gateway_serial(settings) == first

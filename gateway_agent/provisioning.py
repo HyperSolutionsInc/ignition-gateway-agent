@@ -71,7 +71,8 @@ def gateway_serial(settings: Settings) -> str:
             return value
     except FileNotFoundError:
         pass
-    value = "gw-" + secrets.token_hex(6)
+    # The template prefixes "hyper-gw-", so a generated serial needs no prefix of its own.
+    value = "auto-" + secrets.token_hex(6)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value + "\n")
     return value

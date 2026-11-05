@@ -2,7 +2,7 @@
 # Ignition commissions itself, the agent mints its own Ignition API key, provisions its own AWS
 # IoT identity from the fleet claim certificate, and installs the IMSs the cloud assigns it.
 #
-#   docker build -t hyper-gateway:0.2.0 \
+#   docker build -t hyper-gateway:0.2.1 \
 #     --build-arg IOT_ENDPOINT=<account>-ats.iot.us-east-2.amazonaws.com \
 #     --build-arg IOT_PROVISIONING_TEMPLATE=<template> .
 #
