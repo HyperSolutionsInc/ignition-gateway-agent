@@ -188,7 +188,7 @@ class ShadowAgent:
                 update["restart_refused"] = "ALLOW_REMOTE_RESTART is off on this gateway"
 
         if update:
-            self._report(GATEWAY_SHADOW, update)
+            self._report_changes(GATEWAY_SHADOW, update, reported)
 
     def _apply_ims(self, name: str, desired: dict[str, Any], reported: dict[str, Any],
                    doc_version: int | None = None) -> None:
@@ -200,7 +200,8 @@ class ShadowAgent:
         if desired.get("remove"):
             if local and local["status"] != "removed":
                 self.installer.remove(ims, "shadow")
-            self._report(name, {"remove": True, "status": "removed", "error": None, "applied_at": _now()})
+            self._report_changes(name, {"remove": True, "status": "removed", "error": None, "applied_at": _now()},
+                                 reported)
             return
 
         # Mirror every desired key the cloud sets (remove: false included), or the delta never clears.
@@ -230,9 +231,10 @@ class ShadowAgent:
                 result = self.installer.reconfigure(ims, enabled=desired.get("enabled"), interval_ms=desired.get("interval_ms"))
             elif installed:
                 manifest = local["manifest"]
-                self._report(name, {**mirror, "status": "installed", "package_version": local["version"],
-                                    "tag_count": manifest.get("tag_count"), "tag_folder": manifest.get("tag_folder"),
-                                    "error": None}, clear_source="source" in desired)
+                self._report_changes(name, {**mirror, "status": "installed", "package_version": local["version"],
+                                            "tag_count": manifest.get("tag_count"),
+                                            "tag_folder": manifest.get("tag_folder"), "error": None},
+                                     reported, clear_source="source" in desired)
                 return
             else:
                 return
@@ -284,6 +286,17 @@ class ShadowAgent:
                 self._chunks.pop(request_id, None)
 
     # ------------------------------------------------------------ outbound
+
+    def _report_changes(self, name: str, update: dict[str, Any], reported: dict[str, Any],
+                        clear_source: bool = False) -> None:
+        """Report only what the shadow doesn't already say. AWS sends a fresh delta after every
+        accepted update while any desired key differs from reported, so a no-op report answering
+        a delta would be answered by another delta, forever (a refused restart, or a removed IMS
+        whose desired still names a package, keep a delta open)."""
+        volatile = ("applied_at",)
+        if not clear_source and all(reported.get(k) == v for k, v in update.items() if k not in volatile):
+            return
+        self._report(name, update, clear_source=clear_source)
 
     def _report(self, name: str, reported: dict[str, Any], clear_source: bool = False,
                 version: int | None = None) -> None:

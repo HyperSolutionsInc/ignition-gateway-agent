@@ -22,3 +22,5 @@ docker/claim/*
 *.ignition.json
 *.edge-config*.zip
 out/
+
+console/build/

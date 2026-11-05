@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  hyper gateway fleet console: web UI and API for gateway shadows, IMS (PPM) packages and the
+  fleet, plus the package server that sends packages to gateways over MQTT.
+  No sign-in yet; the API only accepts the allowlisted source IPs.
+
+Parameters:
+  AllowedCidrs:
+    Type: CommaDelimitedList
+    Description: Source IPs/CIDRs allowed to reach the console (office, VPN exit), e.g. 50.154.200.106/32
+  ThingPrefix:
+    Type: String
+    Default: hyper-gw-
+    Description: Only things with this prefix are gateways the console may touch.
+  HamfApiUrl:
+    Type: String
+    Default: ""
+    Description: HAMF API base URL (https://host/...). Empty turns HAMF pull off.
+  HealthStaleSeconds:
+    Type: Number
+    Default: 180
+    Description: A gateway whose last health report is older than this shows as offline.
+
+Conditions:
+  HasHamf: !Not [!Equals [!Ref HamfApiUrl, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        BUCKET: !Ref PackageBucket
+        THING_PREFIX: !Ref ThingPrefix
+
+Resources:
+  # Uploaded exports (uploads/, kept 2 days) and the packages assigned to each gateway
+  # (packages/<thing>/ims-<key>/<sha256>, plus .manifest.json used for diffs).
+  PackageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub hyper-console-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: {Status: Enabled}
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-uploads
+            Prefix: uploads/
+            Status: Enabled
+            ExpirationInDays: 2
+          - Id: old-versions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+      CorsConfiguration:
+        CorsRules:
+          # The browser PUTs an export straight to S3 with a presigned URL from the console.
+          - AllowedMethods: [PUT]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["content-type"]
+            MaxAge: 600
+
+  PackageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PackageBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt PackageBucket.Arn, !Sub "${PackageBucket.Arn}/*"]
+            Condition: {Bool: {"aws:SecureTransport": "false"}}
+          - Sid: UploadsOnlyFromAllowedNetworks
+            # A presigned upload URL only works from the same networks as the console.
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub "${PackageBucket.Arn}/uploads/*"
+            Condition:
+              NotIpAddress: {"aws:SourceIp": !Ref AllowedCidrs}
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: pk, AttributeType: S}
+        - {AttributeName: sk, AttributeType: S}
+      KeySchema:
+        - {AttributeName: pk, KeyType: HASH}
+        - {AttributeName: sk, KeyType: RANGE}
+      TimeToLiveSpecification: {AttributeName: expires, Enabled: true}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+
+  ConsoleApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: console
+      EndpointConfiguration: {Type: REGIONAL}
+      MethodSettings:
+        - {ResourcePath: "/*", HttpMethod: "*", ThrottlingRateLimit: 20, ThrottlingBurstLimit: 40}
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: Allow
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource: execute-api:/*
+            - Effect: Deny
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource: execute-api:/*
+              Condition:
+                NotIpAddress: {"aws:SourceIp": !Ref AllowedCidrs}
+
+  ConsoleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: console_api.lambda_handler
+      CodeUri: build/  # per function: cloudformation package ignores Globals.CodeUri
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          AUDIT_TABLE: !Ref AuditTable
+          HAMF_API_URL: !If [HasHamf, !Ref HamfApiUrl, ""]
+          HEALTH_STALE_S: !Ref HealthStaleSeconds
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: [iot:ListThings, iot:DescribeEndpoint]
+              Resource: "*"
+            - Effect: Allow
+              Action: [iot:DescribeThing, iot:UpdateThing, iot:DeleteThing, iot:ListThingPrincipals,
+                       iot:DetachThingPrincipal, iot:GetThingShadow, iot:UpdateThingShadow,
+                       iot:DeleteThingShadow, iot:ListNamedShadowsForThing]
+              Resource: !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:thing/${ThingPrefix}*"
+            - Effect: Allow
+              Action: [iot:DescribeCertificate, iot:UpdateCertificate]
+              Resource: !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:cert/*"
+            - Effect: Allow
+              Action: [s3:GetObject, s3:PutObject]
+              Resource: [!Sub "${PackageBucket.Arn}/uploads/*", !Sub "${PackageBucket.Arn}/packages/*"]
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:Query]
+              Resource: !GetAtt AuditTable.Arn
+      Events:
+        Root:
+          Type: Api
+          Properties: {RestApiId: !Ref ConsoleApi, Path: /, Method: ANY}
+        Proxy:
+          Type: Api
+          Properties: {RestApiId: !Ref ConsoleApi, Path: "/{proxy+}", Method: ANY}
+
+  PackageServerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: package_server.lambda_handler
+      CodeUri: build/
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${PackageBucket.Arn}/packages/*"
+            - Effect: Allow
+              Action: iot:Publish
+              Resource: !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/hyper/${ThingPrefix}*/package/chunk"
+            - Effect: Allow
+              Action: iot:DescribeEndpoint
+              Resource: "*"
+
+  PackageRequestRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: hyper_package_request
+      TopicRulePayload:
+        AwsIotSqlVersion: "2016-03-23"
+        RuleDisabled: false
+        Sql: "SELECT *, topic(2) AS thing FROM 'hyper/+/package/request'"
+        Actions:
+          - Lambda: {FunctionArn: !GetAtt PackageServerFunction.Arn}
+
+  PackageRequestPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PackageServerFunction
+      Principal: iot.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !GetAtt PackageRequestRule.Arn
+
+Outputs:
+  ConsoleUrl:
+    Value: !Sub "https://${ConsoleApi}.execute-api.${AWS::Region}.amazonaws.com/console/"
+  PackageBucket:
+    Value: !Ref PackageBucket

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gateway Fleet Console</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Gateway Fleet</span>
+    </a>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#/" data-nav="fleet">Fleet</a>
+      <a href="#/activity" data-nav="activity">Activity</a>
+    </nav>
+    <span class="env" id="env"></span>
+  </header>
+  <main id="view" aria-live="polite"></main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="dialog"></dialog>
+</body>
+</html>

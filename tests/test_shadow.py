@@ -58,11 +58,35 @@ def test_install_from_inline_source(settings, store, installer):
     assert final["reported"]["remove"] is False  # mirrored, so no delta is left behind
     assert final["desired"] == {"source": None}
 
-    # Same desired again (e.g. after a reconnect GET): nothing is re-installed.
+    # Same desired again (e.g. after a reconnect GET): nothing is re-installed, and nothing is
+    # reported, because the shadow already says it all.
     link.published.clear()
     desired.pop("source")
     agent._apply_ims("ims-FWT-02", desired, final["reported"])
+    assert link.updates("ims-FWT-02") == []
+    # A reported state that has drifted (e.g. a lost report) is corrected.
+    agent._apply_ims("ims-FWT-02", desired, {**final["reported"], "status": "downloading"})
     assert link.updates("ims-FWT-02")[-1]["reported"]["status"] == "installed"
+
+
+def test_open_deltas_do_not_cause_a_report_loop(settings, store, installer):
+    # AWS re-sends a delta after every accepted update while any desired key is unmatched, so
+    # answering an unchanged delta with a report would loop forever (seen live: 3,000+ shadow
+    # versions). A refused restart and a removed IMS both leave such a delta open.
+    agent, link = make_agent(settings, store, installer)
+    settings.allow_remote_restart = False
+    agent._apply_gateway({"ims": [], "restart": "r1"}, {})
+    first = link.updates("gateway")[-1]["reported"]
+    assert first["restart_refused"]
+    link.published.clear()
+    agent._apply_gateway({"ims": [], "restart": "r1"}, first)
+    assert link.updates("gateway") == []
+
+    agent._apply_ims("ims-OLD", {"version": "3", "sha256": "a" * 64, "remove": True}, {})
+    removed = link.updates("ims-OLD")[-1]["reported"]
+    link.published.clear()
+    agent._apply_ims("ims-OLD", {"version": "3", "sha256": "a" * 64, "remove": True}, removed)
+    assert link.updates("ims-OLD") == []
 
 
 def test_hash_mismatch_is_reported_and_not_installed(settings, store, installer):

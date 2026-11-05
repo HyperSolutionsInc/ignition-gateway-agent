@@ -54,6 +54,9 @@ server (`tests/conftest.py: FakeIgnition`) and for AWS IoT with an in-memory lin
 | A34 | MQTT message handlers run on their own dispatch thread, never on paho's network thread, so a handler that publishes and waits for its PUBACK can't stall the link. | `test_shadow.py`: `test_iot_handlers_run_off_the_network_thread` |
 | A35 | The interim `downloading` report is pinned to the shadow document version it was read at, so if AWS applies it after the final report it is rejected (409, not an error) instead of overwriting the final status. Every desired key the cloud sets, `remove: false` included, is mirrored so the delta clears. | `test_interim_report_is_pinned_to_document_version`, `test_version_conflict_on_update_is_not_an_error`, `test_install_from_inline_source` |
 | A36 | A generated gateway serial is `auto-<12 hex>`, so the thing is `hyper-gw-auto-…`. | `test_provisioning.py` |
+| A37 | The agent never answers a delta with a report the shadow already holds (`applied_at` ignored), so a delta that stays open (a refused restart, a removed IMS) can't start a delta→report loop. | `test_open_deltas_do_not_cause_a_report_loop`, `test_install_from_inline_source` |
+| A38 | Fleet console API: serves the UI with a strict CSP; every change needs `X-Console-Request`; it only touches `hyper-gw-` things; publishing stores the package and manifest under the gateway's own prefix and sets an MQTT source; preview diffs against the current package; bad uploads, exports, timers and actions are refused; stale gateways show offline; presigned URLs are never echoed; labels, remove, retry, timer, rollout (one failure doesn't stop the rest), decommission (confirm, certificate revoked) and audit filtering all work. | `test_console.py` |
+| A39 | Package server: the chunks reassemble exactly; it serves only packages stored under the requesting gateway's thing name, refuses malformed requests and objects that don't match their hash; the real agent installs a console package fetched over MQTT through it. | `test_package_server_*`, `test_agent_fetches_a_console_package_over_mqtt` |
 
 ## Verified outside the unit tests
 
@@ -101,6 +104,24 @@ Found and fixed during the run:
   its own PUBACK, which stalled the whole link for 10 s at a time. The outbox backed up (94
   messages) and timed-out publishes were sent twice. Handlers now have their own thread (A34).
 * **F5.** A generated serial started with `gw-`, giving `hyper-gw-gw-…` (A36).
+
+Fleet console, deployed to the same sandbox (stack `hyper-console`, allowlist 50.154.200.106/32):
+
+| # | Step | Result |
+|---|---|---|
+| E11 | `tools/aws_setup.sh`, then `console/deploy.sh`, on a clean account. | Pass after F6. |
+| E12 | The fleet list shows two fresh gateways, their labels and health. | Pass. |
+| E13 | Publish two IMSs through the console: upload, then MQTT delivery. | Pass. Installed about 3 s after publishing. |
+| E14 | Publish the real FWT-02 export (2.7 MB). | Pass. 31 chunks, 3,901 tags, installed 11 s after publishing. |
+| E15 | In the UI: update with a diff, add, timer, rollout to two gateways, activity, decommission dialog (cancelled). | Pass, with screenshots in [CONSOLE.md](CONSOLE.md). |
+| E16 | Refused remote restart. | Pass after F7. |
+
+* **F6.** `aws cloudformation package` ignores `Globals.CodeUri`, so the Lambdas deployed
+  without code. `CodeUri` is now set on each function.
+* **F7.** A refused restart (and likewise a removed IMS) leaves a delta open, and AWS sends a
+  delta after every accepted update. The agent answered each delta with an unchanged report,
+  so it looped: about 4 shadow updates a second, measured live. It now reports only changes
+  (A37), and the version stayed flat afterwards.
 
 For the consumer: delivery is at least once, and the run saw duplicate ticks before F4. De-duplicate
 on `(gw, ims, ts)`.

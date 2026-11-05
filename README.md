@@ -59,8 +59,10 @@ the agent's state (tokens, identity, outbox).
 
 ## Adding an IMS
 
-Normally the cloud assigns IMSs and the gateway installs them by itself
-(`tools/publish_ims.py`, see [docs/aws-fleet-provisioning.md](docs/aws-fleet-provisioning.md)).
+Normally the cloud assigns IMSs and the gateway installs them by itself. The
+[fleet console](docs/CONSOLE.md) does this from a browser: add, update, roll out, timers,
+decommission. For scripts there is `tools/publish_ims.py` (see
+[docs/aws-fleet-provisioning.md](docs/aws-fleet-provisioning.md)).
 On site, any of these works too:
 
 ```bash
