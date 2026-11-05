@@ -61,12 +61,41 @@ def zipped(files: dict[str, object]) -> bytes:
     return buf.getvalue()
 
 
+def store_tags(root: Path, base: str, node: dict) -> None:
+    """Write an imported node the way Ignition 8.3.7 stores tags (verified on a live gateway):
+    a directory per folder, its atomic tags in `tags.json`; Overwrite merges by name and never
+    deletes tags that are absent from the import."""
+    folder = root.joinpath(*[p for p in base.split("/") if p], node["name"])
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "unary-resource.json").write_text("{}")
+    atoms = [c for c in node.get("tags", []) if c["tagType"] == "AtomicTag"]
+    if atoms:
+        tags_file = folder / "tags.json"
+        current = {t["name"]: t for t in json.loads(tags_file.read_text())} if tags_file.exists() else {}
+        current.update({t["name"]: t for t in atoms})
+        tags_file.write_text(json.dumps(list(current.values())))
+    for child in node.get("tags", []):
+        if child["tagType"] == "Folder":
+            store_tags(folder, "", child)
+
+
+def stored_tag_paths(root: Path) -> list[str]:
+    out = []
+    for tags_file in sorted(root.rglob("tags.json")):
+        rel = tags_file.parent.relative_to(root).as_posix()
+        out += ["%s/%s" % (rel, t["name"]) for t in json.loads(tags_file.read_text())]
+    return sorted(out)
+
+
 class FakeIgnition:
-    """Records REST calls the agent makes; stands in for the gateway's /data/api/v1."""
+    """Stands in for the gateway's /data/api/v1: records calls, and stores imported tags on
+    disk like the real gateway so deletion through the tag-definition files can be tested."""
 
     def __init__(self):
         self.calls = []
         self.fail_import = False
+        self.tag_root: Path | None = None
+        self.projects = ["hyper-gateway"]  # what /projects/list reports as loaded
 
         outer = self
 
@@ -84,14 +113,23 @@ class FakeIgnition:
                 if self.path == "/StatusPing":
                     return self._reply(200, b'{"state":"RUNNING"}')
                 outer.calls.append(("GET", self.path, None, self.headers.get("X-Ignition-API-Token")))
+                if self.path.startswith("/data/api/v1/projects/list"):
+                    return self._reply(200, json.dumps({"items": [{"name": n} for n in outer.projects]}).encode())
                 return self._reply(200)
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else b""
-                outer.calls.append(("POST", self.path, body, self.headers.get("X-Ignition-API-Token")))
-                if outer.fail_import and self.path.startswith("/data/api/v1/tags/import"):
-                    return self._reply(500, b"boom")
+                outer.calls.append(("POST", self.path, body, self.headers.get("X-Ignition-API-Token"),
+                                    self.headers.get("Content-Type")))
+                if self.path.startswith("/data/api/v1/tags/import"):
+                    if outer.fail_import:
+                        return self._reply(500, b"boom")
+                    if outer.tag_root is not None:
+                        from urllib.parse import parse_qs, urlsplit
+                        q = parse_qs(urlsplit(self.path).query)
+                        store_tags(outer.tag_root / q["provider"][0], q["path"][0], json.loads(body))
+                    return self._reply(200, b'{"successCount":1,"failureCount":0,"failures":[]}')
                 return self._reply(200)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -123,6 +161,7 @@ def settings(tmp_path: Path, fake_ignition):
     s.agent_url_for_ignition = "http://gateway-agent:8600"
     s.api_token = "admin-token-0123456789abcdef"
     s.ingest_token = "ingest-token-0123456789abcdef"
+    fake_ignition.tag_root = s.ignition_data_dir / "config/resources/core/ignition/tag-definition"
     return s
 
 

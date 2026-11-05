@@ -1,0 +1,2 @@
+# For tools/publish_ims.py (runs in the cloud or on an operator's machine, not in the gateway image)
+boto3>=1.34

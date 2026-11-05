@@ -46,6 +46,11 @@ server (`tests/conftest.py: FakeIgnition`) and for AWS IoT with an in-memory lin
 | A26 | Telemetry input is fully validated: IMS key and version format, timestamp between 2000 and one day ahead, positive 64-bit `tag_id`, value a number, boolean or string of at most 1,024 characters, at most 1,000 ticks per post and 100,000 readings per tick, non-negative `bad` count. `NaN` and `Infinity` (not valid JSON) are dropped and counted as bad, and the encoder refuses to write them. | `test_nan_and_infinity_are_dropped_and_counted_bad`, `test_invalid_telemetry_is_rejected`, `test_post_size_limits`, `test_valid_post_is_accepted` |
 | A27 | No token value is ever printed by the CLI, and a logging filter masks every configured secret in log messages, arguments and tracebacks. | `test_rotate_tokens_never_prints_token_values`, `test_secret_redaction_masks_messages_args_and_tracebacks` |
 | A28 | Secret writes are atomic and verified: on failure the old secret stays and no temp file is left, and after writing, the content and 0600 mode are checked. `IOT_ENDPOINT` must be a bare DNS hostname (no scheme, port or path), `IOT_PORT` must be 1–65535, and the thing name/client id must be AWS-valid, checked before any connection is made. | `test_round4.py`: `test_failed_secret_write_leaves_old_secret_and_no_temp_file`, `test_secret_write_is_verified`, `test_iot_endpoint_must_be_a_bare_hostname`, `test_iot_settings_validation` |
+| A29 | First boot needs no hands: the agent mints its Ignition API key (`gateway-agent:<key>`, hash = base64url(SHA-256(key bytes)), checked against Ignition's own example), writes the key and a `GatewayAgent` security level into `external`, and grants that level API read and write in whichever collection holds the security properties (local before core), refusing an `AllOf` rule it can't satisfy. `bootstrap prepare` exits 3 until the gateway has started once. | `test_bootstrap.py` |
+| A30 | Fleet provisioning by claim: creates a certificate, provisions it through the template with the serial and any extra parameters, and stores the certificate, key and thing name with mode 0600. Refusals store nothing. A configured identity beats a stored one, which beats provisioning. Provisioning retries until it works or the agent stops, and a generated serial is kept. | `test_provisioning.py` |
+| A31 | The REST client matches Ignition 8.3.7's API. Tags are imported as the IMS folder node, sent as `application/octet-stream`, and a reported `failureCount` is an error. Restart uses `restart-tasks/restart?confirm=true`. | `test_round4.py`: `test_import_reports_gateway_side_failures`, `test_restart_uses_restart_tasks_with_confirm`; `test_installer.py`: `test_install_writes_project_and_calls_gateway` |
+| A32 | Tags dropped by an update, and a removed IMS's folder, are deleted from the tag-definition files (8.3.7 has no REST delete, and Overwrite keeps them), followed by a config scan. Deletion can't leave the tag-definition tree. | `test_update_deletes_dropped_tags`, `test_update_that_drops_one_tag_keeps_its_neighbours`, `test_remove`, `test_tag_deletion_cannot_escape_the_tag_definitions` |
+| A33 | An install fails, and is recorded as failed, if Ignition doesn't load the project after the rescan. Generated resources carry no `lastModification` (8.3.7 skips a project whose `lastModification` has no timestamp). A tag with a null value isn't sent. | `test_install_fails_if_ignition_does_not_load_the_project`, `test_generated_resources_carry_no_lastmodification`, `test_publisher_parses_and_has_agent_url_and_token` |
 
 ## Verified outside the unit tests
 
@@ -132,6 +137,23 @@ pip-audit -r requirements.txt       # no known vulnerabilities (paho-mqtt 2.1.0)
   are recorded as confirmations.
 * The PR #3 security review stalled on an escalation claiming its test document was missing.
   The document was at the stated path, and the escalation was answered so the review resumed.
+
+## Changes in 0.2.0: single hands-free image
+
+* One image (Ignition 8.3.7 + agent) that installs itself (A29), provisions its AWS identity
+  (A30), and takes IMSs from the cloud through Device Shadows (`tools/publish_ims.py`).
+* REST calls checked against the gateway's real `/openapi.json`. Tag deletion is reworked
+  because 8.3.7 has no REST delete (A31, A32).
+* Three defects found by booting the image on a live gateway, all fixed (A33):
+  1. Generated `resource.json` files without a `lastModification` timestamp made Ignition
+     skip the project. A rescan still returned 200, so the installer now verifies the project
+     loaded.
+  2. Null tag values were sent as the string `"None"`.
+  3. The import body format was wrong for 8.3.7.
+* Verified live on Kingdel, in a throwaway container from empty volumes:
+  * hands-free boot in about 55 s;
+  * the real FWT-02 export installs, its timer runs every second, and readings queue;
+  * tag deletion by file plus config scan, and project hot-load, both work.
 
 ## Changes from review round 5 (R-0019 to R-0024)
 

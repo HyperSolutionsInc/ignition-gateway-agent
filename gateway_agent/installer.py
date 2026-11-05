@@ -14,13 +14,14 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import generator, hamf
 from .config import Settings
-from .ignition import IgnitionClient
+from .ignition import IgnitionClient, IgnitionError
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -107,7 +108,8 @@ class Installer:
             for rel in generator.ims_resource_dirs(module):
                 shutil.rmtree(self.settings.project_dir / rel, ignore_errors=True)
             folder = previous["manifest"]["tag_folder"]
-            self.ignition.delete_tags(self.settings.tag_provider, [_strip_provider(folder)])
+            if self._delete_tag_definitions([_strip_provider(folder)]):
+                self.ignition.scan_config()
             self.ignition.scan_projects()
             self.store.record_package(ims, previous["version"], "removed", source, previous["manifest"], [])
             log.info("removed IMS %s (%s)", ims, source)
@@ -176,10 +178,61 @@ class Installer:
         for rel, content in art.ims_files.items():
             _write_atomic(project / rel, content)
 
-        if removed:
-            self.ignition.delete_tags(self.settings.tag_provider, removed)
-        self.ignition.import_tags(self.settings.tag_provider, _strip_provider(art.tag_base_path), art.tags)
+        # Import with Overwrite updates tags in place but keeps tags the new version dropped,
+        # and 8.3 has no REST delete, so those are removed from the tag-definition files first.
+        if removed and self._delete_tag_definitions(removed):
+            self.ignition.scan_config()
+        self.ignition.import_tags(self.settings.tag_provider, _strip_provider(art.tag_base_path), art.tags[0])
         self.ignition.scan_projects()
+        self._confirm_project_loaded()
+
+    def _confirm_project_loaded(self, timeout_s: float = 20.0) -> None:
+        """A rescan returns 200 even when Ignition rejects the project files, so check it loaded."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if self.settings.ignition_project in self.ignition.project_names():
+                return
+            if time.monotonic() > deadline:
+                raise IgnitionError("project %s did not load after the rescan; see the gateway log"
+                                    % self.settings.ignition_project)
+            time.sleep(1)
+
+    def _tag_definition_root(self) -> Path:
+        return (self.settings.ignition_data_dir / "config" / "resources" / "core" / "ignition" / "tag-definition"
+                / self.settings.tag_provider)
+
+    def _delete_tag_definitions(self, paths: list[str]) -> bool:
+        """Delete tags or whole folders (provider-relative paths) from the stored tag definitions.
+
+        Each folder is a directory holding `tags.json` for the tags directly inside it. A path
+        naming a folder removes the directory; a path naming a tag removes its entry from its
+        folder's `tags.json`. Returns True if anything changed (the caller then scans config).
+        """
+        root = self._tag_definition_root().resolve()
+        changed = False
+        by_folder: dict[Path, set[str]] = {}
+        for rel in paths:
+            parts = [p for p in rel.split("/") if p]
+            if not parts:
+                continue
+            target = root.joinpath(*parts).resolve()
+            if root not in target.parents:
+                raise ValueError("tag path %r escapes the tag definitions" % rel)
+            if target.is_dir():
+                shutil.rmtree(target)
+                changed = True
+            else:
+                by_folder.setdefault(target.parent, set()).add(parts[-1])
+        for folder, names in by_folder.items():
+            tags_file = folder / "tags.json"
+            if not tags_file.exists():
+                continue
+            entries = json.loads(tags_file.read_text())
+            kept = [e for e in entries if e.get("name") not in names]
+            if len(kept) != len(entries):
+                _write_atomic(tags_file, (json.dumps(kept, indent=2) + "\n").encode("utf-8"))
+                changed = True
+        return changed
 
     def _removed_tag_paths(self, pkg: hamf.Package, previous: dict[str, Any] | None) -> list[str]:
         """Tags present in the installed version but absent from the new one."""

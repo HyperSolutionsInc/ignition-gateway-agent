@@ -2,7 +2,9 @@
 .git
 .pytest_cache
 **/__pycache__
-deploy/.env
-deploy/certs
+**/*.egg-info
+deploy
+docs
 tests
+tools
 out

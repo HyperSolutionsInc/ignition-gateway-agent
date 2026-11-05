@@ -10,6 +10,8 @@
   gateway-agent check-iot                 connect to AWS IoT with the configured certificate
   gateway-agent rotate-tokens [--admin] [--ingest]
                                           replace generated API tokens (both by default); restart to apply
+  gateway-agent bootstrap prepare|finalize
+                                          first-boot Ignition setup, run by the image entrypoint
 """
 
 from __future__ import annotations
@@ -59,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("rotate-tokens")
     p.add_argument("--admin", action="store_true", help="rotate only the admin token")
     p.add_argument("--ingest", action="store_true", help="rotate only the ingest token")
+    p = sub.add_parser("bootstrap", help="first-boot Ignition setup (run by the image entrypoint)")
+    p.add_argument("phase", choices=["prepare", "finalize"])
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -92,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
         return _render(settings, args.file, args.out_dir, args.ims)
     if args.cmd == "check-iot":
         return _check_iot(settings, args.timeout)
+    if args.cmd == "bootstrap":
+        return _bootstrap(settings, args.phase)
     if args.cmd == "rotate-tokens":
         both = not (args.admin or args.ingest)
         try:
@@ -117,6 +123,8 @@ def _run(settings: Settings) -> int:
     from .store import Store
     from .telemetry import Telemetry
 
+    from . import bootstrap
+
     log = logging.getLogger("gateway_agent")
     log.info("gateway-agent %s starting", __version__)
     try:
@@ -124,57 +132,97 @@ def _run(settings: Settings) -> int:
     except ValueError as exc:
         log.error("configuration error: %s", exc)
         return 2
+    if not settings.ignition_api_token:
+        # The bundled image's key, minted by `gateway-agent bootstrap` before Ignition started.
+        try:
+            settings.ignition_api_token = bootstrap.api_key_path(settings).read_text().strip()
+        except FileNotFoundError:
+            pass
     install_secret_redaction([settings.api_token, settings.ingest_token, settings.ignition_api_token])
     store = Store(settings.db_path)
     ignition = IgnitionClient(settings.ignition_url, settings.ignition_api_token)
     installer = Installer(settings, store, ignition)
     telemetry = Telemetry(settings, store)
-
-    link = publisher = shadow = None
-    if settings.iot_enabled:
-        if not (settings.iot_endpoint and settings.thing_name):
-            log.error("IOT_ENDPOINT and IOT_THING_NAME are required (or set IOT_ENABLED=false)")
-            return 2
-        from .iot import IotLink, Publisher
-
-        try:
-            link = IotLink(settings)
-        except (OSError, ValueError) as exc:
-            log.error("cannot set up the AWS IoT link: %s", exc)
-            return 2
-        publisher = Publisher(settings, store, link)
-
-    def health() -> dict[str, Any]:
-        return build_health(settings, store, link or _Offline(), publisher, telemetry, ignition, shadow)
-
-    if link is not None and settings.shadow_enabled:
-        shadow = ShadowAgent(settings, store, installer, link, health=health, publisher=publisher, ignition=ignition)
-        shadow.start()
-    if link is not None:
-        publisher.start()
-        link.start()
-
-    try:
-        installer.refresh_shared()
-    except Exception:
-        log.exception("could not refresh shared project files; will retry on the next install")
-
-    server = make_server(settings.http_host, settings.http_port, telemetry=telemetry, installer=installer,
-                         status=health, api_token=settings.api_token, ingest_token=settings.ingest_token)
-    serve_in_background(server)
-    Inbox(settings.inbox_dir, installer).start()
-    log.info("HTTP API on %s:%d, inbox %s", settings.http_host, settings.http_port, settings.inbox_dir)
-
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
+    parts: dict[str, Any] = {"link": None, "publisher": None, "shadow": None}
+
+    def health() -> dict[str, Any]:
+        return build_health(settings, store, parts["link"] or _Offline(), parts["publisher"], telemetry, ignition,
+                            parts["shadow"])
+
+    # The API comes up first so timer scripts can hand over readings while the rest starts.
+    server = make_server(settings.http_host, settings.http_port, telemetry=telemetry, installer=installer,
+                         status=health, api_token=settings.api_token, ingest_token=settings.ingest_token)
+    serve_in_background(server)
+    log.info("HTTP API on %s:%d", settings.http_host, settings.http_port)
+
+    log.info("waiting for Ignition at %s", settings.ignition_url)
+    if ignition.wait_until_running(settings.ignition_wait_s):
+        try:
+            installer.refresh_shared()
+        except Exception:
+            log.exception("could not refresh shared project files; will retry on the next install")
+    else:
+        log.warning("Ignition is not running after %ds; carrying on, installs will fail until it is",
+                    settings.ignition_wait_s)
+    Inbox(settings.inbox_dir, installer).start()
+    log.info("inbox %s", settings.inbox_dir)
+
+    if settings.iot_enabled:
+        threading.Thread(target=_start_iot, name="iot-start", daemon=True,
+                         args=(settings, store, installer, ignition, health, parts, stop)).start()
+
     stop.wait()
     log.info("stopping")
     server.shutdown()
-    if link is not None:
-        publisher.stop()
-        link.stop()
+    if parts["link"] is not None:
+        parts["publisher"].stop()
+        parts["link"].stop()
     return 0
+
+
+def _start_iot(settings, store, installer, ignition, health, parts, stop) -> None:
+    """Find or provision the gateway's AWS identity, then bring up the link, publisher and shadows."""
+    from .iot import IotLink, Publisher
+    from .provisioning import apply_identity, resolve_identity
+    from .shadow import ShadowAgent
+
+    log = logging.getLogger("gateway_agent")
+    ident = resolve_identity(settings, stop)
+    if ident is None:
+        if not stop.is_set():
+            log.error("no AWS IoT identity: set IOT_THING_NAME and a certificate, or a claim certificate and "
+                      "IOT_PROVISIONING_TEMPLATE (or IOT_ENABLED=false). Readings keep buffering.")
+        return
+    apply_identity(settings, ident)
+    try:
+        link = IotLink(settings)
+    except (OSError, ValueError) as exc:
+        log.error("cannot set up the AWS IoT link: %s", exc)
+        return
+    publisher = Publisher(settings, store, link)
+    parts.update(link=link, publisher=publisher)
+    if settings.shadow_enabled:
+        shadow = ShadowAgent(settings, store, installer, link, health=health, publisher=publisher, ignition=ignition)
+        parts["shadow"] = shadow
+        shadow.start()
+    publisher.start()
+    link.start()
+    log.info("AWS IoT link starting as %s", settings.thing_name)
+
+
+def _bootstrap(settings: Settings, phase: str) -> int:
+    """Called by the image's entrypoint while Ignition is stopped. Exit 3 = start Ignition once first."""
+    from . import bootstrap
+
+    done = bootstrap.prepare(settings) if phase == "prepare" else bootstrap.finalize(settings)
+    if done:
+        print("Ignition bootstrap: API key and %s access in place" % bootstrap.LEVEL_NAME)
+        return 0
+    print("Ignition bootstrap: security properties not created yet; start the gateway once, then finalize")
+    return 3
 
 
 class SecretRedactor(logging.Filter):
@@ -233,9 +281,14 @@ def _render(settings: Settings, file: Path, out_dir: Path, ims: str | None) -> i
 
 def _check_iot(settings: Settings, timeout: float) -> int:
     from .iot import IotLink
+    from .provisioning import apply_identity, stored_identity
 
+    if not settings.thing_name:
+        ident = stored_identity(settings)
+        if ident:
+            apply_identity(settings, ident)
     if not (settings.iot_endpoint and settings.mqtt_client_id):
-        print("IOT_ENDPOINT and IOT_THING_NAME (or IOT_CLIENT_ID) must be set", file=sys.stderr)
+        print("no identity yet: set IOT_THING_NAME, or let the gateway provision itself on first boot", file=sys.stderr)
         return 2
     try:
         link = IotLink(settings)

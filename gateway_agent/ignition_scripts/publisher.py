@@ -60,7 +60,9 @@ def tick(imsKey, version, meta):
 	rows = []
 	bad = 0
 	for m, qv in zip(meta, values):
-		if not qv.quality.isGood():
+		# A tag with no value (for example a memory tag that never read a device) reports Good
+		# quality with a null value; count it as bad rather than send a placeholder.
+		if not qv.quality.isGood() or qv.value is None:
 			bad += 1
 			continue
 		rows.append([m[1], _jsonValue(qv.value)])

@@ -246,3 +246,34 @@ def test_iot_settings_validation(settings):
     settings.thing_name, settings.client_id = "gw/../x", ""
     with pytest.raises(ValueError, match="IOT_THING_NAME"):
         settings.validate_iot()
+
+
+# ---------------------------------------------------------------- Ignition REST client vs 8.3.7's real API
+
+def test_import_reports_gateway_side_failures(settings, fake_ignition):
+    from gateway_agent.ignition import IgnitionClient, IgnitionError
+    client = IgnitionClient(settings.ignition_url, settings.ignition_api_token)
+    import http.server
+    orig = fake_ignition.server.RequestHandlerClass.do_POST
+
+    def failing(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        body = b'{"successCount":0,"failureCount":1,"failures":[{"path":"x","error":"bad"}]}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    fake_ignition.server.RequestHandlerClass.do_POST = failing
+    try:
+        with pytest.raises(IgnitionError, match="1 failure"):
+            client.import_tags("default", "A", {"name": "B", "tagType": "Folder", "tags": []})
+    finally:
+        fake_ignition.server.RequestHandlerClass.do_POST = orig
+
+
+def test_restart_uses_restart_tasks_with_confirm(settings, fake_ignition):
+    from gateway_agent.ignition import IgnitionClient
+    IgnitionClient(settings.ignition_url, settings.ignition_api_token).restart()
+    assert fake_ignition.calls[-1][1] == "/data/api/v1/restart-tasks/restart?confirm=true"

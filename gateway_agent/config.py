@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -79,6 +80,19 @@ def _write_secret(path: Path, value: str) -> None:
         raise OSError("secret %s did not verify after writing (mode %o)" % (path, mode))
 
 
+def _env_json_object(name: str) -> dict:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError("%s must be a JSON object: %s" % (name, exc)) from exc
+    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+        raise ValueError("%s must be a JSON object of string values" % name)
+    return value
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw in (None, ""):
@@ -105,6 +119,8 @@ class Settings:
     # (customer / campus / building / power cell = 4).
     ims_path_depth: int = field(default_factory=lambda: _env_int("IMS_PATH_DEPTH", 4))
     timer_interval_ms: int = field(default_factory=lambda: _env_int("TIMER_INTERVAL_MS", 1000))
+    # How long the agent waits at start for Ignition to report RUNNING before installing.
+    ignition_wait_s: int = field(default_factory=lambda: _env_int("IGNITION_WAIT_S", 600))
 
     # Local HTTP API: timer scripts post telemetry here; operators post HAMF packages here.
     # Inside the container it has to listen on all interfaces so the Ignition container can reach
@@ -131,7 +147,15 @@ class Settings:
     iot_cert_path: str = field(default_factory=lambda: _env("IOT_CERT_PATH", "/certs/device.cert.pem"))
     iot_key_path: str = field(default_factory=lambda: _env("IOT_KEY_PATH", "/certs/device.private.key"))
     # The thing name is also the MQTT client id and the gateway's identity everywhere else.
+    # Leave it (and the certificate) unset to have the gateway provision itself on first boot.
     thing_name: str = field(default_factory=lambda: _env("IOT_THING_NAME"))
+    # Fleet provisioning by claim (provisioning.py): the fleet's claim certificate, the template
+    # it is allowed to use, extra template parameters (JSON object) and this gateway's serial.
+    iot_provisioning_template: str = field(default_factory=lambda: _env("IOT_PROVISIONING_TEMPLATE"))
+    iot_claim_cert_path: str = field(default_factory=lambda: _env("IOT_CLAIM_CERT_PATH", "/opt/gateway-agent/claim/claim.cert.pem"))
+    iot_claim_key_path: str = field(default_factory=lambda: _env("IOT_CLAIM_KEY_PATH", "/opt/gateway-agent/claim/claim.private.key"))
+    iot_provisioning_parameters: dict = field(default_factory=lambda: _env_json_object("IOT_PROVISIONING_PARAMETERS"))
+    gateway_serial: str = field(default_factory=lambda: _env("GATEWAY_SERIAL"))
     client_id: str = field(default_factory=lambda: _env("IOT_CLIENT_ID"))
     # Telemetry goes through AWS IoT Basic Ingest: published to $aws/rules/<rule>/<topic>, it is
     # handed straight to the rule (no pub/sub messaging charge, no subscribers). The rule still

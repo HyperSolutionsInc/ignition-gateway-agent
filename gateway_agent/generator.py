@@ -172,6 +172,8 @@ def _timer_script(module: str) -> str:
     ) % (MANAGED_BY, module)
 
 
+# No `lastModification` attribute: Ignition 8.3.7 requires its timestamp and skips the whole
+# project on a scan if one is missing (seen on a live gateway). Ignition records its own.
 def _library_resource() -> bytes:
     return _json(
         {
@@ -180,7 +182,7 @@ def _library_resource() -> bytes:
             "restricted": False,
             "overridable": True,
             "files": ["code.py"],
-            "attributes": {"hintScope": 2, "lastModification": {"actor": MANAGED_BY}},
+            "attributes": {"hintScope": 2},
         }
     )
 
@@ -199,7 +201,6 @@ def _timer_resource(interval_ms: int, enabled: bool) -> bytes:
                 "delay": interval_ms,
                 "fixedDelay": True,
                 "enabled": enabled,
-                "lastModification": {"actor": MANAGED_BY},
             },
         }
     )

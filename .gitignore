@@ -8,11 +8,15 @@ dist/
 
 # Secrets and per-site config
 deploy/.env
-deploy/certs/
 deploy/secrets/
 *.pem
 *.key
 *.crt
+# The fleet claim certificate is copied into the image at build time, never committed
+docker/claim/*
+!docker/claim/README.md
+# Amazon Root CA 1 is a public certificate, baked into the image
+!docker/certs/AmazonRootCA1.pem
 
 # HAMF exports carry real site data; keep them out of the repo
 *.ignition.json

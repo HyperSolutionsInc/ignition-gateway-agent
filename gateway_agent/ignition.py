@@ -1,8 +1,9 @@
 """Ignition 8.3 gateway REST client.
 
-Uses an API key (Gateway > Security > API Keys) sent as X-Ignition-API-Token. Endpoint paths
-are collected in ENDPOINTS so they can be adjusted against the gateway's own /openapi listing
-without touching the call sites.
+Uses an API key sent as `X-Ignition-API-Token: <name>:<key>` (bootstrap.py mints it). The
+paths in ENDPOINTS are checked against Ignition 8.3.7's own /openapi.json. 8.3.7 has no
+REST call that deletes tags, so the installer deletes them from the tag-definition files and
+asks for a config scan.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,8 +26,8 @@ ENDPOINTS = {
     "scan_config": "/data/api/v1/scan/config",
     "tags_import": "/data/api/v1/tags/import",
     "tags_export": "/data/api/v1/tags/export",
-    "tags_delete": "/data/api/v1/tags/delete",
-    "restart": "/data/api/v1/restart",
+    "projects_list": "/data/api/v1/projects/list",
+    "restart": "/data/api/v1/restart-tasks/restart",
 }
 
 
@@ -60,21 +62,29 @@ class IgnitionClient:
     def gateway_info(self) -> dict[str, Any]:
         return json.loads(self._request("GET", ENDPOINTS["gateway_info"]))
 
+    def project_names(self) -> list[str]:
+        body = json.loads(self._request("GET", ENDPOINTS["projects_list"]))
+        return [p.get("name") for p in body.get("items", [])]
+
     def export_tags(self, provider: str, path: str) -> Any:
         query = {"provider": provider, "path": path, "type": "json", "recursive": "true"}
         return json.loads(self._request("GET", ENDPOINTS["tags_export"], query=query))
 
     # ------------------------------------------------------------ writes
 
-    def import_tags(self, provider: str, base_path: str, tags: list[dict[str, Any]], policy: str = "Overwrite") -> None:
-        """Import tag nodes beneath base_path (provider-relative, no [provider] prefix)."""
-        query = {"provider": provider, "path": base_path, "type": "json", "collisionPolicy": policy}
-        body = json.dumps({"tags": tags}).encode("utf-8")
-        self._request("POST", ENDPOINTS["tags_import"], query=query, body=body)
+    def import_tags(self, provider: str, base_path: str, node: dict[str, Any], policy: str = "Overwrite") -> None:
+        """Import one tag node (a folder and everything in it) beneath base_path.
 
-    def delete_tags(self, provider: str, paths: list[str]) -> None:
-        body = json.dumps({"provider": provider, "paths": paths}).encode("utf-8")
-        self._request("POST", ENDPOINTS["tags_delete"], body=body)
+        The body is the node's JSON as an export file, sent as octet-stream. `Overwrite`
+        replaces tags that exist but leaves tags absent from the node in place.
+        """
+        query = {"provider": provider, "path": base_path, "type": "json", "collisionPolicy": policy}
+        body = json.dumps(node).encode("utf-8")
+        result = json.loads(self._request("POST", ENDPOINTS["tags_import"], query=query, body=body,
+                                          content_type="application/octet-stream") or b"{}")
+        if result.get("failureCount"):
+            raise IgnitionError("tag import reported %d failure(s): %s" % (
+                result["failureCount"], json.dumps(result.get("failures"))[:400]))
 
     def scan_projects(self) -> None:
         self._request("POST", ENDPOINTS["scan_projects"])
@@ -83,7 +93,15 @@ class IgnitionClient:
         self._request("POST", ENDPOINTS["scan_config"])
 
     def restart(self) -> None:
-        self._request("POST", ENDPOINTS["restart"])
+        self._request("POST", ENDPOINTS["restart"], query={"confirm": "true"})
+
+    def wait_until_running(self, timeout_s: float, poll_s: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.status() == "RUNNING":
+                return True
+            time.sleep(poll_s)
+        return self.status() == "RUNNING"
 
     # ------------------------------------------------------------ transport
 
@@ -95,16 +113,17 @@ class IgnitionClient:
         query: dict[str, str] | None = None,
         body: bytes | None = None,
         auth: bool = True,
+        content_type: str = "application/json",
     ) -> bytes:
         url = self.base_url + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
         req = urllib.request.Request(url, data=body, method=method)
         if body is not None:
-            req.add_header("Content-Type", "application/json")
+            req.add_header("Content-Type", content_type)
         if auth:
             if not self.api_token:
-                raise IgnitionError("IGNITION_API_TOKEN is not set; create an API key in the gateway")
+                raise IgnitionError("no Ignition API key; it is minted at first boot (bootstrap) or set by IGNITION_API_TOKEN")
             req.add_header("X-Ignition-API-Token", self.api_token)
         try:
             # base_url's scheme is checked in __init__ and path/query are built here, never taken from input.

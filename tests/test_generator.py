@@ -83,6 +83,8 @@ def test_publisher_parses_and_has_agent_url_and_token():
     assert 'AGENT_URL = "http://gateway-agent:8600" + "/v1/telemetry"' in source
     assert 'INGEST_TOKEN = "ingest-token-0123456789abcdef"' in source
     assert '"X-Agent-Token": INGEST_TOKEN' in source
+    # Seen on a live gateway: a Good-quality tag with a null value was sent as the string "None".
+    assert "qv.value is None" in source
     assert json.loads(files["project.json"])["enabled"] is True
 
 
